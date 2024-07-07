@@ -18,3 +18,4 @@ customtkinter
 tensorrt-cu11
 tensorrt_lean-cu11
 tensorrt_dispatch-cu11
+pyvirtualcam==0.11.1
