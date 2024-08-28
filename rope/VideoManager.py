@@ -980,6 +980,9 @@ class VideoManager():
     def swap_core(self, img, kps, s_e, t_e, parameters, control): # img = RGB
         swapper_model = parameters['FaceSwapperModelTextSel']
 
+        # Set Default for DEVELOPMENT
+        swapper_model = 'DFL'
+
         if swapper_model != 'GhostFace-v1' and swapper_model != 'GhostFace-v2' and swapper_model != 'GhostFace-v3':
             # 512 transforms
             dst = self.arcface_dst * 4.0
@@ -1027,7 +1030,12 @@ class VideoManager():
         original_face_512 = v2.functional.crop(original_face_512, 0,0, 512, 512)# 3, 512, 512
         original_face_256 = t256(original_face_512)
         original_face_128 = t128(original_face_256)
+
+        if swapper_model == 'DFL':
+            tDFL = v2.Resize((self.models.dfl_model._input_height,self.models.dfl_model._input_width))
+            original_face_tDFL = tDFL(original_face_512)
         #cv2.imwrite('test.png', cv2.cvtColor(original_face_512.permute(1,2,0).cpu().numpy(), cv2.COLOR_RGB2BGR))
+
 
         if swapper_model == 'Inswapper128':
             latent = torch.from_numpy(self.models.calc_swapper_latent(s_e)).float().to('cuda')
@@ -1061,10 +1069,12 @@ class VideoManager():
                 factor = parameters['FaceLikenessFactorSlider']
                 dst_latent = torch.from_numpy(self.models.calc_swapper_latent_ghost(t_e)).float().to('cuda')
                 latent = latent - (factor * dst_latent)
-
             dim = 2
-            input_face_affined = original_face_256
 
+
+        elif swapper_model == 'DFL':
+            latent = torch.from_numpy(self.models.calc_swapper_latent_dfl(s_e)).float().to('cuda')
+            input_face_affined = original_face_512
         # Optional Scaling # change the thransform matrix
         if parameters['FaceAdjSwitch']:
             #input_face_affined = v2.functional.affine(input_face_affined, 0, (0, 0), 1 + parameters['FaceScaleSlider'] / 100, 0, center=(dim*128-1, dim*128-1), interpolation=v2.InterpolationMode.BILINEAR)
@@ -1074,7 +1084,11 @@ class VideoManager():
         if parameters['StrengthSwitch']:
             itex = ceil(parameters['StrengthSlider'] / 100.)
 
-        output_size = int(128 * dim)
+        if swapper_model=='DFL':
+            output_size = self.models.dfl_model._input_height
+        else:
+            output_size = int(128 * dim)
+
         output = torch.zeros((output_size, output_size, 3), dtype=torch.float32, device='cuda')
         input_face_affined = input_face_affined.permute(1, 2, 0)
         input_face_affined = torch.div(input_face_affined, 255.0)
@@ -1082,68 +1096,74 @@ class VideoManager():
 
         # DFL Model Test
         print(self.models.dfl_model)
+        def show_image(img):
+            plt.imshow(img_crop.cpu().numpy())
+            plt.show()
         if self.models.dfl_model:
-            fai_ip = self.models.dfl_model.get_fai_ip(original_face_512.permute(1,2,0).cpu().numpy())
+            # Get face alignment image processor
+            fai_ip = self.models.dfl_model.get_fai_ip(original_face_512.permute(1, 2, 0).cpu().numpy())
             test_swap = fai_ip.get_image('HWC')
+
+            # Convert and obtain outputs
             out_celeb, out_celeb_mask, out_face_mask = self.models.dfl_model.convert(test_swap)
-            
-            swap = torch.from_numpy(out_celeb.copy()).permute(2,0,1).cuda()
-            
+            swap = torch.from_numpy(out_celeb.copy()).permute(2, 0, 1).cuda()
+
+            # Process mask
             out_celeb_mask = np.squeeze(out_celeb_mask, axis=0)
-            swap_mask = torch.from_numpy(out_celeb_mask.copy()).permute(2,0,1).cuda()
-            # Cslculate the area to be mergerd back to the original frame
+            swap_mask = torch.from_numpy(out_celeb_mask.copy()).permute(2, 0, 1).cuda()
+
+            # Inverse transformation for face area cropping
             IM512 = tform.inverse.params[0:2, :]
-            corners = np.array([[0,0], [0,511], [511, 0], [511, 511]])
+            corners = np.array([[0, 0], [0, 511], [511, 0], [511, 511]])
 
-            x = (IM512[0][0]*corners[:,0] + IM512[0][1]*corners[:,1] + IM512[0][2])
-            y = (IM512[1][0]*corners[:,0] + IM512[1][1]*corners[:,1] + IM512[1][2])
+            # Calculate the bounding box for the swapped face
+            x = (IM512[0][0] * corners[:, 0] + IM512[0][1] * corners[:, 1] + IM512[0][2])
+            y = (IM512[1][0] * corners[:, 0] + IM512[1][1] * corners[:, 1] + IM512[1][2])
 
-            left = floor(np.min(x))
-            if left<0:
-                left=0
-            top = floor(np.min(y))
-            if top<0:
-                top=0
-            right = ceil(np.max(x))
-            if right>img.shape[2]:
-                right=img.shape[2]
-            bottom = ceil(np.max(y))
-            if bottom>img.shape[1]:
-                bottom=img.shape[1]
+            left = max(floor(np.min(x)), 0)
+            top = max(floor(np.min(y)), 0)
+            right = min(ceil(np.max(x)), img.shape[2])
+            bottom = min(ceil(np.max(y)), img.shape[1])
 
-
-            # # Untransform the swap
-            swap = v2.functional.pad(swap, (0,0,img.shape[2]-512, img.shape[1]-512))
-            swap = v2.functional.affine(swap, tform.inverse.rotation*57.2958, (tform.inverse.translation[0], tform.inverse.translation[1]), tform.inverse.scale, 0,interpolation=v2.InterpolationMode.BILINEAR, center = (0,0) )
-            swap = swap[0:3, top:bottom, left:right]
+            # Pad and transform the swapped face
+            swap = v2.functional.pad(swap, (0, 0, img.shape[2] - 512, img.shape[1] - 512))
+            swap = v2.functional.affine(
+                swap, tform.inverse.rotation * 57.2958,
+                (tform.inverse.translation[0], tform.inverse.translation[1]),
+                tform.inverse.scale, 0,
+                interpolation=v2.InterpolationMode.BILINEAR, center=(0, 0)
+            )
+            swap = swap[:, top:bottom, left:right]
             swap = swap.permute(1, 2, 0)
 
-            # Untransform the swap mask
-            swap_mask = v2.functional.pad(swap_mask, (0,0,img.shape[2]-512, img.shape[1]-512))
-            swap_mask = v2.functional.affine(swap_mask, tform.inverse.rotation*57.2958, (tform.inverse.translation[0], tform.inverse.translation[1]), tform.inverse.scale, 0, interpolation=v2.InterpolationMode.BILINEAR, center = (0,0) )
-            swap_mask = swap_mask[0:1, top:bottom, left:right]
+            # Pad and transform the mask
+            swap_mask = v2.functional.pad(swap_mask, (0, 0, img.shape[2] - 512, img.shape[1] - 512))
+            swap_mask = v2.functional.affine(
+                swap_mask, tform.inverse.rotation * 57.2958,
+                (tform.inverse.translation[0], tform.inverse.translation[1]),
+                tform.inverse.scale, 0,
+                interpolation=v2.InterpolationMode.BILINEAR, center=(0, 0)
+            )
+            swap_mask = swap_mask[:, top:bottom, left:right]
             swap_mask = swap_mask.permute(1, 2, 0)
-            swap_mask = torch.sub(1, swap_mask)
 
-            # Apply the mask to the original image areas
+            # Normalize the mask for blending (1 for swap, 0 for original)
+            swap_mask = swap_mask / 255.0
+
+            # Extract the crop from the original image
             img_crop = img[0:3, top:bottom, left:right]
-            img_crop = img_crop.permute(1,2,0)
-            img_crop = torch.mul(swap_mask,img_crop)
+            img_crop = img_crop.permute(1, 2, 0)
 
-            # plt.imshow(img_crop.cpu().numpy())
-            # plt.show()
+            # Blend the swapped face and the original image
+            blended_crop = swap * swap_mask + img_crop * (1 - swap_mask)
 
-            # plt.imshow(img.permute(1,2,0).cpu().numpy())
-            # plt.show()
-            
-            print("swap_shape",swap.shape)
-            # print("imgcrop_shape",img_crop.shape)
+            # Ensure the result is within the valid range and data type
+            blended_crop = torch.clamp(blended_crop, 0, 255).type(torch.uint8)
 
+            # Replace the original image crop with the blended result
+            blended_crop = blended_crop.permute(2, 0, 1)
+            img[0:3, top:bottom, left:right] = blended_crop
 
-            # swap = torch.add(swap, img_crop)
-            swap = swap.type(torch.uint8)
-            swap = swap.permute(2,0,1)
-            img[0:3, top:bottom, left:right] = swap
             return img
 
         if swapper_model == 'Inswapper128':

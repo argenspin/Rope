@@ -438,6 +438,12 @@ class Models():
         self.syncvec.cpu()
         ghostfaceswap_model.run_with_iobinding(io_binding)
 
+
+    def calc_swapper_latent_dfl(self, source_embedding):
+        latent = source_embedding.reshape((1,-1))
+
+        return latent
+
     def run_swap_stg1(self, embedding):
 
         # Load model
