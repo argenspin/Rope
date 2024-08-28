@@ -10,6 +10,7 @@ import subprocess
 from math import floor, ceil
 import bisect
 import onnxruntime
+import torch.utils
 import torchvision
 from torchvision.transforms.functional import normalize #update to v2
 import torch
@@ -24,6 +25,8 @@ import inspect #print(inspect.currentframe().f_back.f_code.co_name, 'resize_imag
 import pyvirtualcam
 import platform
 import psutil
+import matplotlib.pyplot as plt
+from xlib.image import ImageProcessor
 
 device = 'cuda'
 
@@ -1076,6 +1079,73 @@ class VideoManager():
         input_face_affined = input_face_affined.permute(1, 2, 0)
         input_face_affined = torch.div(input_face_affined, 255.0)
 
+
+        # DFL Model Test
+        print(self.models.dfl_model)
+        if self.models.dfl_model:
+            fai_ip = self.models.dfl_model.get_fai_ip(original_face_512.permute(1,2,0).cpu().numpy())
+            test_swap = fai_ip.get_image('HWC')
+            out_celeb, out_celeb_mask, out_face_mask = self.models.dfl_model.convert(test_swap)
+            
+            swap = torch.from_numpy(out_celeb.copy()).permute(2,0,1).cuda()
+            
+            out_celeb_mask = np.squeeze(out_celeb_mask, axis=0)
+            swap_mask = torch.from_numpy(out_celeb_mask.copy()).permute(2,0,1).cuda()
+            # Cslculate the area to be mergerd back to the original frame
+            IM512 = tform.inverse.params[0:2, :]
+            corners = np.array([[0,0], [0,511], [511, 0], [511, 511]])
+
+            x = (IM512[0][0]*corners[:,0] + IM512[0][1]*corners[:,1] + IM512[0][2])
+            y = (IM512[1][0]*corners[:,0] + IM512[1][1]*corners[:,1] + IM512[1][2])
+
+            left = floor(np.min(x))
+            if left<0:
+                left=0
+            top = floor(np.min(y))
+            if top<0:
+                top=0
+            right = ceil(np.max(x))
+            if right>img.shape[2]:
+                right=img.shape[2]
+            bottom = ceil(np.max(y))
+            if bottom>img.shape[1]:
+                bottom=img.shape[1]
+
+
+            # # Untransform the swap
+            swap = v2.functional.pad(swap, (0,0,img.shape[2]-512, img.shape[1]-512))
+            swap = v2.functional.affine(swap, tform.inverse.rotation*57.2958, (tform.inverse.translation[0], tform.inverse.translation[1]), tform.inverse.scale, 0,interpolation=v2.InterpolationMode.BILINEAR, center = (0,0) )
+            swap = swap[0:3, top:bottom, left:right]
+            swap = swap.permute(1, 2, 0)
+
+            # Untransform the swap mask
+            swap_mask = v2.functional.pad(swap_mask, (0,0,img.shape[2]-512, img.shape[1]-512))
+            swap_mask = v2.functional.affine(swap_mask, tform.inverse.rotation*57.2958, (tform.inverse.translation[0], tform.inverse.translation[1]), tform.inverse.scale, 0, interpolation=v2.InterpolationMode.BILINEAR, center = (0,0) )
+            swap_mask = swap_mask[0:1, top:bottom, left:right]
+            swap_mask = swap_mask.permute(1, 2, 0)
+            swap_mask = torch.sub(1, swap_mask)
+
+            # Apply the mask to the original image areas
+            img_crop = img[0:3, top:bottom, left:right]
+            img_crop = img_crop.permute(1,2,0)
+            img_crop = torch.mul(swap_mask,img_crop)
+
+            # plt.imshow(img_crop.cpu().numpy())
+            # plt.show()
+
+            # plt.imshow(img.permute(1,2,0).cpu().numpy())
+            # plt.show()
+            
+            print("swap_shape",swap.shape)
+            # print("imgcrop_shape",img_crop.shape)
+
+
+            # swap = torch.add(swap, img_crop)
+            swap = swap.type(torch.uint8)
+            swap = swap.permute(2,0,1)
+            img[0:3, top:bottom, left:right] = swap
+            return img
+
         if swapper_model == 'Inswapper128':
             for k in range(itex):
                 for j in range(dim):
@@ -1136,6 +1206,7 @@ class VideoManager():
         output = output.permute(2, 0, 1)
 
         swap = t512(output)
+
         #cv2.imwrite('test_swap512.png', cv2.cvtColor(swap.permute(1,2,0).cpu().numpy(), cv2.COLOR_RGB2BGR))
 
         if parameters['StrengthSwitch']:
@@ -1195,6 +1266,7 @@ class VideoManager():
         # Restorer
         if parameters["RestorerSwitch"]:
             swap = self.func_w_test('Restorer', self.apply_restorer, swap, parameters)
+
 
         # Apply color corerctions
         if parameters['ColorSwitch']:

@@ -15,6 +15,9 @@ onnxruntime.log_verbosity_level = -1
 import rope.FaceUtil as faceutil
 import pickle
 import math
+from dfl.DFMModel import DFMModel
+from xlib.onnxruntime.device import ORTDeviceInfo
+
 
 class Models():
     def __init__(self):
@@ -48,6 +51,23 @@ class Models():
         self.ghostfacev1swap_model = []
         self.ghostfacev2swap_model = []
         self.ghostfacev3swap_model = []
+
+
+        providers = [
+                        ('TensorrtExecutionProvider', {
+                            'trt_engine_cache_enable': True,
+                            'trt_engine_cache_path': "tensorrt-engines",
+                            'trt_timing_cache_enable': True,
+                            'trt_timing_cache_path': "tensorrt-engines",
+                            'trt_dump_ep_context_model': True,
+                            'trt_ep_context_file_path': "tensorrt-engines",
+                            'trt_layer_norm_fp32_fallback': True,
+                            'trt_builder_optimization_level': 5,
+                        }),
+                        ('CUDAExecutionProvider'),
+                        ('CPUExecutionProvider')
+                    ]
+        self.dfl_model = DFMModel('./dfl_models/Keanu_Reeves.onnx', providers)
 
         self.emap = []
         self.GFPGAN_model = []
@@ -290,6 +310,7 @@ class Models():
         self.occluder_model = []
         self.model_xseg = []
         self.faceparser_model = []
+        self.dfl_model = []
 
     def run_recognize(self, img, kps, similarity_type='Opal', face_swapper_model='Inswapper128'):
         if face_swapper_model == 'Inswapper128':
@@ -331,6 +352,8 @@ class Models():
             # self.swapper_model = onnxruntime.InferenceSession( "./models/inswapper_128_last_cubic.onnx", sess_options, providers=[('CUDAExecutionProvider', cuda_options), 'CPUExecutionProvider'])
 
             self.swapper_model = onnxruntime.InferenceSession( "./models/inswapper_128.fp16.onnx", providers=self.providers)
+        if not self.dfl_model:    
+            self.dfl_model = DFMModel('./dfl_models/Keanu_Reeves.onnx')
 
         io_binding = self.swapper_model.io_binding()
         io_binding.bind_input(name='target', device_type='cuda', device_id=0, element_type=np.float32, shape=(1,3,128,128), buffer_ptr=image.data_ptr())

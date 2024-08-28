@@ -7,6 +7,7 @@
 *.engine
 *.profile
 *.timing
+xlib/
 saved_parameters*.json
 startup_parameters*.json
 data.json
@@ -18,6 +19,7 @@ merged_embeddings*.txt
 tensorrt-engines/
 source_videos/
 source_images/
+output/
 dependencies/
 Rope_TensorRT*.bat
 unins000.dat
