@@ -3,12 +3,8 @@ from typing import Tuple
 import numpy as np
 from PIL import Image
 import onnxruntime
-from matplotlib import pyplot as plt
-from xlib import onnxruntime as lib_ort
-from xlib import path as lib_path
 from xlib.image import ImageProcessor
-from xlib.net import ThreadFileDownloader
-from xlib.onnxruntime.device import ORTDeviceInfo
+
 
 
 
