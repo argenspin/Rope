@@ -16,3 +16,4 @@ regex
 customtkinter
 pyvirtualcam==0.11.1
 psutil
+numexpr

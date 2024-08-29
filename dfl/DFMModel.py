@@ -3,7 +3,7 @@ from typing import Tuple
 import numpy as np
 from PIL import Image
 import onnxruntime
-from xlib.image import ImageProcessor
+from dfl.xlib.image import ImageProcessor
 
 
 

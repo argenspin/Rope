@@ -26,7 +26,7 @@ import pyvirtualcam
 import platform
 import psutil
 import matplotlib.pyplot as plt
-from xlib.image import ImageProcessor
+from dfl.xlib.image import ImageProcessor
 device = 'cuda'
 from dfl.DFMModel import DFMModel
 
@@ -981,7 +981,12 @@ class VideoManager():
 
         if dfl_model:
             if not self.models.dfl_models.get(dfl_model):
-                self.models.dfl_models[dfl_model] = DFMModel(f'./dfl_models/{dfl_model}', self.models.providers)
+                try:
+                    self.models.dfl_models[dfl_model] = DFMModel(f'./dfl_models/{dfl_model}', self.models.providers)
+                except Exception as e:
+                    print(e)
+                    return img
+
             dfl_model = self.models.dfl_models[dfl_model]
 
 

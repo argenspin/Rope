@@ -16,7 +16,7 @@ import rope.FaceUtil as faceutil
 import pickle
 import math
 from dfl.DFMModel import DFMModel
-from xlib.onnxruntime.device import ORTDeviceInfo
+from dfl.xlib.onnxruntime.device import ORTDeviceInfo
 
 
 class Models():
