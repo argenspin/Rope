@@ -26,7 +26,6 @@ import pyvirtualcam
 import platform
 import psutil
 import matplotlib.pyplot as plt
-from dfl.xlib.image import ImageProcessor
 device = 'cuda'
 from dfl.DFMModel import DFMModel
 

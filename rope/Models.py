@@ -52,22 +52,6 @@ class Models():
         self.ghostfacev2swap_model = []
         self.ghostfacev3swap_model = []
 
-
-        providers = [
-                        # ('TensorrtExecutionProvider', {
-                        #     'trt_engine_cache_enable': True,
-                        #     'trt_engine_cache_path': "tensorrt-engines",
-                        #     'trt_timing_cache_enable': True,
-                        #     'trt_timing_cache_path': "tensorrt-engines",
-                        #     'trt_dump_ep_context_model': True,
-                        #     'trt_ep_context_file_path': "tensorrt-engines",
-                        #     'trt_layer_norm_fp32_fallback': True,
-                        #     'trt_builder_optimization_level': 5,
-                        # }),
-                        ('CUDAExecutionProvider'),
-                        ('CPUExecutionProvider')
-                    ]
-        # self.dfl_model = DFMModel('./dfl_models/Elizabeth Olsen 384.dfm', providers)
         self.dfl_models = {}
         self.emap = []
         self.GFPGAN_model = []
