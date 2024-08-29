@@ -67,8 +67,8 @@ class Models():
                         ('CUDAExecutionProvider'),
                         ('CPUExecutionProvider')
                     ]
-        self.dfl_model = DFMModel('./dfl_models/Elizabeth Olsen 384.dfm', providers)
-
+        # self.dfl_model = DFMModel('./dfl_models/Elizabeth Olsen 384.dfm', providers)
+        self.dfl_models = {}
         self.emap = []
         self.GFPGAN_model = []
         self.GPEN_256_model = []
@@ -352,8 +352,6 @@ class Models():
             # self.swapper_model = onnxruntime.InferenceSession( "./models/inswapper_128_last_cubic.onnx", sess_options, providers=[('CUDAExecutionProvider', cuda_options), 'CPUExecutionProvider'])
 
             self.swapper_model = onnxruntime.InferenceSession( "./models/inswapper_128.fp16.onnx", providers=self.providers)
-        if not self.dfl_model:    
-            self.dfl_model = DFMModel('./dfl_models/Keanu_Reeves.onnx')
 
         io_binding = self.swapper_model.io_binding()
         io_binding.bind_input(name='target', device_type='cuda', device_id=0, element_type=np.float32, shape=(1,3,128,128), buffer_ptr=image.data_ptr())

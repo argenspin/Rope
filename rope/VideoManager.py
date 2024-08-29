@@ -27,8 +27,8 @@ import platform
 import psutil
 import matplotlib.pyplot as plt
 from xlib.image import ImageProcessor
-
 device = 'cuda'
+from dfl.DFMModel import DFMModel
 
 lock=threading.Lock()
 
@@ -899,9 +899,8 @@ class VideoManager():
                     # if the face[i] in the frame matches afound face[j] AND the found face is active (not [])
                     if sim>=float(parameters["ThresholdSlider"]) and found_face["SourceFaceAssignments"]:
                         s_e = found_face["AssignedEmbedding"]
-                        img_orig = torch.clone(img)
                         # s_e = found_face['ptrdata']
-                        img = self.func_w_test("swap_video", self.swap_core, img, fface[0], s_e, fface[1], parameters, control)
+                        img = self.func_w_test("swap_video", self.swap_core, img, fface[0], s_e, fface[1], parameters, control, found_face.get('DFLModel',False))
                         # img = img.permute(2,0,1)
 
             img = img.permute(1,2,0)
@@ -977,11 +976,17 @@ class VideoManager():
         return result
 
     # @profile
-    def swap_core(self, img, kps, s_e, t_e, parameters, control): # img = RGB
+    def swap_core(self, img, kps, s_e, t_e, parameters, control, dfl_model=False): # img = RGB
         swapper_model = parameters['FaceSwapperModelTextSel']
 
+        if dfl_model:
+            if not self.models.dfl_models.get(dfl_model):
+                self.models.dfl_models[dfl_model] = DFMModel(f'./dfl_models/{dfl_model}', self.models.providers)
+            dfl_model = self.models.dfl_models[dfl_model]
+
+
         # Set Default for DEVELOPMENT
-        swapper_model = 'DFL'
+        # swapper_model = 'DFL'
 
         if swapper_model != 'GhostFace-v1' and swapper_model != 'GhostFace-v2' and swapper_model != 'GhostFace-v3':
             # 512 transforms
@@ -1031,50 +1036,48 @@ class VideoManager():
         original_face_256 = t256(original_face_512)
         original_face_128 = t128(original_face_256)
 
-        if swapper_model == 'DFL':
-            tDFL = v2.Resize((self.models.dfl_model._input_height,self.models.dfl_model._input_width))
-            original_face_tDFL = tDFL(original_face_512)
         #cv2.imwrite('test.png', cv2.cvtColor(original_face_512.permute(1,2,0).cpu().numpy(), cv2.COLOR_RGB2BGR))
 
 
-        if swapper_model == 'Inswapper128':
-            latent = torch.from_numpy(self.models.calc_swapper_latent(s_e)).float().to('cuda')
-            if parameters['FaceLikenessSwitch']:
-                factor = parameters['FaceLikenessFactorSlider']
-                dst_latent = torch.from_numpy(self.models.calc_swapper_latent(t_e)).float().to('cuda')
-                latent = latent - (factor * dst_latent)
-
-            dim = 1
-            if parameters['SwapperTypeTextSel'] == '128':
-                dim = 1
-                input_face_affined = original_face_128
-            elif parameters['SwapperTypeTextSel'] == '256':
-                dim = 2
-                input_face_affined = original_face_256
-            elif parameters['SwapperTypeTextSel'] == '512':
-                dim = 4
-                input_face_affined = original_face_512
-        elif swapper_model == 'SimSwap512':
-            latent = torch.from_numpy(self.models.calc_swapper_latent_simswap512(s_e)).float().to('cuda')
-            if parameters['FaceLikenessSwitch']:
-                factor = parameters['FaceLikenessFactorSlider']
-                dst_latent = torch.from_numpy(self.models.calc_swapper_latent_simswap512(t_e)).float().to('cuda')
-                latent = latent - (factor * dst_latent)
-
-            dim = 4
-            input_face_affined = original_face_512
-        elif swapper_model == 'GhostFace-v1' or swapper_model == 'GhostFace-v2' or swapper_model == 'GhostFace-v3':
-            latent = torch.from_numpy(self.models.calc_swapper_latent_ghost(s_e)).float().to('cuda')
-            if parameters['FaceLikenessSwitch']:
-                factor = parameters['FaceLikenessFactorSlider']
-                dst_latent = torch.from_numpy(self.models.calc_swapper_latent_ghost(t_e)).float().to('cuda')
-                latent = latent - (factor * dst_latent)
-            dim = 2
-
-
-        elif swapper_model == 'DFL':
+        if dfl_model:
             latent = torch.from_numpy(self.models.calc_swapper_latent_dfl(s_e)).float().to('cuda')
             input_face_affined = original_face_512
+
+        else:
+            if swapper_model == 'Inswapper128':
+                latent = torch.from_numpy(self.models.calc_swapper_latent(s_e)).float().to('cuda')
+                if parameters['FaceLikenessSwitch']:
+                    factor = parameters['FaceLikenessFactorSlider']
+                    dst_latent = torch.from_numpy(self.models.calc_swapper_latent(t_e)).float().to('cuda')
+                    latent = latent - (factor * dst_latent)
+
+                dim = 1
+                if parameters['SwapperTypeTextSel'] == '128':
+                    dim = 1
+                    input_face_affined = original_face_128
+                elif parameters['SwapperTypeTextSel'] == '256':
+                    dim = 2
+                    input_face_affined = original_face_256
+                elif parameters['SwapperTypeTextSel'] == '512':
+                    dim = 4
+                    input_face_affined = original_face_512
+            elif swapper_model == 'SimSwap512':
+                latent = torch.from_numpy(self.models.calc_swapper_latent_simswap512(s_e)).float().to('cuda')
+                if parameters['FaceLikenessSwitch']:
+                    factor = parameters['FaceLikenessFactorSlider']
+                    dst_latent = torch.from_numpy(self.models.calc_swapper_latent_simswap512(t_e)).float().to('cuda')
+                    latent = latent - (factor * dst_latent)
+
+                dim = 4
+                input_face_affined = original_face_512
+            elif swapper_model == 'GhostFace-v1' or swapper_model == 'GhostFace-v2' or swapper_model == 'GhostFace-v3':
+                latent = torch.from_numpy(self.models.calc_swapper_latent_ghost(s_e)).float().to('cuda')
+                if parameters['FaceLikenessSwitch']:
+                    factor = parameters['FaceLikenessFactorSlider']
+                    dst_latent = torch.from_numpy(self.models.calc_swapper_latent_ghost(t_e)).float().to('cuda')
+                    latent = latent - (factor * dst_latent)
+                dim = 2
+
         # Optional Scaling # change the thransform matrix
         if parameters['FaceAdjSwitch']:
             #input_face_affined = v2.functional.affine(input_face_affined, 0, (0, 0), 1 + parameters['FaceScaleSlider'] / 100, 0, center=(dim*128-1, dim*128-1), interpolation=v2.InterpolationMode.BILINEAR)
@@ -1084,8 +1087,8 @@ class VideoManager():
         if parameters['StrengthSwitch']:
             itex = ceil(parameters['StrengthSlider'] / 100.)
 
-        if swapper_model=='DFL':
-            output_size = self.models.dfl_model._input_height
+        if dfl_model:
+            output_size = dfl_model._input_height
         else:
             output_size = int(128 * dim)
 
@@ -1095,83 +1098,86 @@ class VideoManager():
 
 
         # DFL Model Test
-        print(self.models.dfl_model)
         def show_image(img):
             plt.imshow(img.cpu().numpy())
             plt.show()
-        if self.models.dfl_model and swapper_model=='DFL':
+        if dfl_model:
             # Get face alignment image processor
-            fai_ip = self.models.dfl_model.get_fai_ip(original_face_512.permute(1, 2, 0).cpu().numpy())
+            fai_ip = dfl_model.get_fai_ip(original_face_512.permute(1, 2, 0).cpu().numpy())
             test_swap = fai_ip.get_image('HWC')
 
             # Convert and obtain outputs
-            out_celeb, out_celeb_mask, out_face_mask = self.models.dfl_model.convert(test_swap)
+            out_celeb, out_celeb_mask, out_face_mask = dfl_model.convert(test_swap)
 
             swapper_output = torch.from_numpy(out_celeb.copy()).cuda()
             # swapper_output = swapper_output.permute(1, 2, 0)
             prev_face = input_face_affined.clone()
             input_face_affined = swapper_output.clone()
 
+            # show_image(prev_face)
+            # show_image(swapper_output)
             output = swapper_output.clone()
 
-        if swapper_model == 'Inswapper128':
-            for k in range(itex):
-                for j in range(dim):
-                    for i in range(dim):
-                        input_face_disc = input_face_affined[j::dim,i::dim]
-                        input_face_disc = input_face_disc.permute(2, 0, 1)
-                        input_face_disc = torch.unsqueeze(input_face_disc, 0).contiguous()
+            # output = color_transfer(prev_face, output)
+        else:
 
-                        swapper_output = torch.empty((1,3,128,128), dtype=torch.float32, device='cuda').contiguous()
-                        self.models.run_swapper(input_face_disc, latent, swapper_output)
+            if swapper_model == 'Inswapper128':
+                for k in range(itex):
+                    for j in range(dim):
+                        for i in range(dim):
+                            input_face_disc = input_face_affined[j::dim,i::dim]
+                            input_face_disc = input_face_disc.permute(2, 0, 1)
+                            input_face_disc = torch.unsqueeze(input_face_disc, 0).contiguous()
 
-                        swapper_output = torch.squeeze(swapper_output)
-                        swapper_output = swapper_output.permute(1, 2, 0)
+                            swapper_output = torch.empty((1,3,128,128), dtype=torch.float32, device='cuda').contiguous()
+                            self.models.run_swapper(input_face_disc, latent, swapper_output)
 
-                        output[j::dim, i::dim] = swapper_output.clone()
-                prev_face = input_face_affined.clone()
-                input_face_affined = output.clone()
-                output = torch.mul(output, 255)
-                output = torch.clamp(output, 0, 255)
+                            swapper_output = torch.squeeze(swapper_output)
+                            swapper_output = swapper_output.permute(1, 2, 0)
 
-            show_image(output)
+                            output[j::dim, i::dim] = swapper_output.clone()
+                    prev_face = input_face_affined.clone()
+                    input_face_affined = output.clone()
+                    output = torch.mul(output, 255)
+                    output = torch.clamp(output, 0, 255)
 
-        elif swapper_model == 'SimSwap512':
-            for k in range(itex):
-                input_face_disc = input_face_affined.permute(2, 0, 1)
-                input_face_disc = torch.unsqueeze(input_face_disc, 0).contiguous()
-                swapper_output = torch.empty((1,3,512,512), dtype=torch.float32, device='cuda').contiguous()
-                self.models.run_swapper_simswap512(input_face_disc, latent, swapper_output)
-                swapper_output = torch.squeeze(swapper_output)
-                swapper_output = swapper_output.permute(1, 2, 0)
-                prev_face = input_face_affined.clone()
-                input_face_affined = swapper_output.clone()
 
-                output = swapper_output.clone()
-                output = torch.mul(output, 255)
-                output = torch.clamp(output, 0, 255)
+            elif swapper_model == 'SimSwap512':
+                for k in range(itex):
+                    input_face_disc = input_face_affined.permute(2, 0, 1)
+                    input_face_disc = torch.unsqueeze(input_face_disc, 0).contiguous()
+                    swapper_output = torch.empty((1,3,512,512), dtype=torch.float32, device='cuda').contiguous()
+                    self.models.run_swapper_simswap512(input_face_disc, latent, swapper_output)
+                    swapper_output = torch.squeeze(swapper_output)
+                    swapper_output = swapper_output.permute(1, 2, 0)
+                    prev_face = input_face_affined.clone()
+                    input_face_affined = swapper_output.clone()
 
-        elif swapper_model == 'GhostFace-v1' or swapper_model == 'GhostFace-v2' or swapper_model == 'GhostFace-v3':
-            for k in range(itex):
-                input_face_disc = torch.mul(input_face_affined, 255.0).permute(2, 0, 1)
-                input_face_disc = torch.div(input_face_disc.float(), 127.5)
-                input_face_disc = torch.sub(input_face_disc, 1)
-                #input_face_disc = input_face_disc[[2, 1, 0], :, :] # Inverte i canali da BGR a RGB (assumendo che l'input sia BGR)
-                input_face_disc = torch.unsqueeze(input_face_disc, 0).contiguous()
-                swapper_output = torch.empty((1,3,256,256), dtype=torch.float32, device='cuda').contiguous()
-                self.models.run_swapper_ghostface(input_face_disc, latent, swapper_output, swapper_model)
-                swapper_output = swapper_output[0]
-                swapper_output = swapper_output.permute(1, 2, 0)
-                swapper_output = torch.mul(swapper_output, 127.5)
-                swapper_output = torch.add(swapper_output, 127.5)
-                #swapper_output = swapper_output[:, :, [2, 1, 0]] # Inverte i canali da RGB a BGR (assumendo che l'input sia RGB)
-                prev_face = input_face_affined.clone()
-                input_face_affined = swapper_output.clone()
-                input_face_affined = torch.div(input_face_affined, 255)
+                    output = swapper_output.clone()
+                    output = torch.mul(output, 255)
+                    output = torch.clamp(output, 0, 255)
 
-                output = swapper_output.clone()
-                output = torch.clamp(output, 0, 255)
-                #cv2.imwrite('test_swap.png', cv2.cvtColor(output.cpu().numpy(), cv2.COLOR_RGB2BGR))
+            elif swapper_model == 'GhostFace-v1' or swapper_model == 'GhostFace-v2' or swapper_model == 'GhostFace-v3':
+                for k in range(itex):
+                    input_face_disc = torch.mul(input_face_affined, 255.0).permute(2, 0, 1)
+                    input_face_disc = torch.div(input_face_disc.float(), 127.5)
+                    input_face_disc = torch.sub(input_face_disc, 1)
+                    #input_face_disc = input_face_disc[[2, 1, 0], :, :] # Inverte i canali da BGR a RGB (assumendo che l'input sia BGR)
+                    input_face_disc = torch.unsqueeze(input_face_disc, 0).contiguous()
+                    swapper_output = torch.empty((1,3,256,256), dtype=torch.float32, device='cuda').contiguous()
+                    self.models.run_swapper_ghostface(input_face_disc, latent, swapper_output, swapper_model)
+                    swapper_output = swapper_output[0]
+                    swapper_output = swapper_output.permute(1, 2, 0)
+                    swapper_output = torch.mul(swapper_output, 127.5)
+                    swapper_output = torch.add(swapper_output, 127.5)
+                    #swapper_output = swapper_output[:, :, [2, 1, 0]] # Inverte i canali da RGB a BGR (assumendo che l'input sia RGB)
+                    prev_face = input_face_affined.clone()
+                    input_face_affined = swapper_output.clone()
+                    input_face_affined = torch.div(input_face_affined, 255)
+
+                    output = swapper_output.clone()
+                    output = torch.clamp(output, 0, 255)
+                    #cv2.imwrite('test_swap.png', cv2.cvtColor(output.cpu().numpy(), cv2.COLOR_RGB2BGR))
 
         output = output.permute(2, 0, 1)
 

@@ -25,6 +25,9 @@ from skimage import transform as trans
 from torchvision.transforms import v2
 from tkinter import messagebox
 
+from os import listdir
+from os.path import isfile, join
+
 import inspect #print(inspect.currentframe().f_back.f_code.co_name, 'resize_image')
 from platform import system
 
@@ -181,6 +184,7 @@ class GUI(tk.Tk):
                             "SourceFaceAssignments":    [],
                             "EmbeddingNumber":          0,       #used for adding additional found faces
                             'AssignedEmbedding':        [],     #the currently assigned source embedding, including averaged ones
+                            'DFLModel':                 False,
                             }
         self.target_faces = []
 
@@ -188,7 +192,9 @@ class GUI(tk.Tk):
                             "TKButton":                 [],
                             "ButtonState":              "off",
                             "Image":                    [],
-                            "Embedding":                []
+                            "Embedding":                [],
+                            'DFLModel':                 False,
+
                             }
         self.source_faces = []
 
@@ -1708,8 +1714,11 @@ class GUI(tk.Tk):
             print("Please set faces and videos folders first!")
             return
 
+
         self.populate_target_videos()
         self.load_input_faces()
+        self.load_dfl_input_models()
+
         self.widget['StartButton'].enable_button()
 
     def select_video_path(self):
@@ -1751,10 +1760,42 @@ class GUI(tk.Tk):
         self.widget['FacesFolderButton'].set(False, request_frame=False)
         self.load_input_faces()
 
+    def load_dfl_input_models(self):
+        dfl_models = []
+        dfl_models_dir = './dfl_models'
+        j=len(self.source_faces)
+        for model_file in listdir(dfl_models_dir):
+            if model_file=='.gitkeep':
+                continue
+            new_source_face = self.source_face.copy()
+            # self.source_faces.append(new_source_face)
+
+            new_source_face["ButtonState"] = False
+            new_source_face["Embedding"] = False
+            new_source_face['DFLModel'] = model_file
+            new_source_face['DFLModelPath'] = f'{dfl_models_dir}/{model_file}'
+
+            button_text = f"(DFM) {model_file.split('.')[0]}"
+            text_font = font.Font(family="Helvetica", size=10)
+
+            # Measure the text width
+            text_width = text_font.measure(button_text)
+            new_source_face["TKButton"] = tk.Button(self.merged_faces_canvas, style.media_button_off_3, image=self.blank, text=button_text, height=14, width=text_width, compound='left')
+
+            new_source_face["TKButton"].bind("<ButtonRelease-1>", lambda event, arg=j: self.select_input_faces(event, arg))
+            new_source_face["TKButton"].bind("<MouseWheel>", lambda event: self.merged_faces_canvas.xview_scroll(-int(event.delta/120.0), "units"))
+
+            self.merged_faces_canvas.create_window((j//4)*92,8+(22*(j%4)), window = new_source_face["TKButton"],anchor='nw')
+            self.source_faces.append(new_source_face)
+            j+=1
+        pass
+
     def load_input_faces(self):
         self.source_faces = []
         self.merged_faces_canvas.delete("all")
         self.source_faces_canvas.delete("all")
+
+
 
         # First load merged embeddings
         try:
@@ -1772,6 +1813,7 @@ class GUI(tk.Tk):
 
                 self.source_faces[j]["ButtonState"] = False
                 self.source_faces[j]["Embedding"] = temp0[j][1]
+
                 self.source_faces[j]["TKButton"] = tk.Button(self.merged_faces_canvas, style.media_button_off_3, image=self.blank, text=temp0[j][0], height=14, width=84, compound='left')
 
                 self.source_faces[j]["TKButton"].bind("<ButtonRelease-1>", lambda event, arg=j: self.select_input_faces(event, arg))
@@ -1993,7 +2035,6 @@ class GUI(tk.Tk):
             for face in self.source_faces:
                 if face["ButtonState"]:
                     face["TKButton"].config(style.media_button_on_3)
-
                     if self.widget['PreviewModeTextSel'].get() == 'FaceLab':
                         self.add_action("load_target_image", face["file"])
                         self.image_loaded = True
@@ -2001,10 +2042,9 @@ class GUI(tk.Tk):
         # Assign all active input faces to the active target face
         for tface in self.target_faces:
             if tface["ButtonState"]:
-
                 # Clear all of the assignments
                 tface["SourceFaceAssignments"] = []
-
+                tface['DFLModel'] = False
                 # Iterate through all Input faces
                 temp_holder = []
                 for j in range(len(self.source_faces)):
@@ -2014,6 +2054,8 @@ class GUI(tk.Tk):
                         tface["SourceFaceAssignments"].append(j)
                         temp_holder.append(self.source_faces[j]['Embedding'])
 
+                        if self.source_faces[j]['DFLModel']:
+                            tface['DFLModel'] = self.source_faces[j]['DFLModel']
                 # do averaging
                 if temp_holder:
                     if self.widget['MergeTextSel'].get() == 'Median':

@@ -124,7 +124,6 @@ class DFMModel:
         # img = np.rot90(img, k=3)
         # plt.imshow(img)
         # plt.show()
-        print('img',img.shape)
 
         ip = ImageProcessor(img)
 
@@ -149,17 +148,3 @@ class DFMModel:
     def get_fai_ip(self, img):
         fai_ip = ImageProcessor(img)
         return fai_ip
-
-# dfm_model = DFMModel('Keanu_Reeves.onnx')
-# img = np.array(Image.open('test_image.jpg'))
-# fai_ip = ImageProcessor(img)
-# img = fai_ip.get_image('HWC')
-
-# out_celeb, out_celeb_mask, out_face_mask = dfm_model.convert(img)
-
-# out = ImageProcessor(out_celeb).get_image('HWC')
-# print(out)
-# plt.imshow(out[:, :, ::-1])
-# plt.show()
-# img = Image.fromarray(out[0].squeeze(out[0], axis=0), 'RGB')
-# img.save('test_out.jpg')
