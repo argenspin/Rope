@@ -1097,74 +1097,22 @@ class VideoManager():
         # DFL Model Test
         print(self.models.dfl_model)
         def show_image(img):
-            plt.imshow(img_crop.cpu().numpy())
+            plt.imshow(img.cpu().numpy())
             plt.show()
-        if self.models.dfl_model:
+        if self.models.dfl_model and swapper_model=='DFL':
             # Get face alignment image processor
             fai_ip = self.models.dfl_model.get_fai_ip(original_face_512.permute(1, 2, 0).cpu().numpy())
             test_swap = fai_ip.get_image('HWC')
 
             # Convert and obtain outputs
             out_celeb, out_celeb_mask, out_face_mask = self.models.dfl_model.convert(test_swap)
-            swap = torch.from_numpy(out_celeb.copy()).permute(2, 0, 1).cuda()
 
-            # Process mask
-            out_celeb_mask = np.squeeze(out_celeb_mask, axis=0)
-            swap_mask = torch.from_numpy(out_celeb_mask.copy()).permute(2, 0, 1).cuda()
+            swapper_output = torch.from_numpy(out_celeb.copy()).cuda()
+            # swapper_output = swapper_output.permute(1, 2, 0)
+            prev_face = input_face_affined.clone()
+            input_face_affined = swapper_output.clone()
 
-            # Inverse transformation for face area cropping
-            IM512 = tform.inverse.params[0:2, :]
-            corners = np.array([[0, 0], [0, 511], [511, 0], [511, 511]])
-
-            # Calculate the bounding box for the swapped face
-            x = (IM512[0][0] * corners[:, 0] + IM512[0][1] * corners[:, 1] + IM512[0][2])
-            y = (IM512[1][0] * corners[:, 0] + IM512[1][1] * corners[:, 1] + IM512[1][2])
-
-            left = max(floor(np.min(x)), 0)
-            top = max(floor(np.min(y)), 0)
-            right = min(ceil(np.max(x)), img.shape[2])
-            bottom = min(ceil(np.max(y)), img.shape[1])
-
-            # Pad and transform the swapped face
-            swap = v2.functional.pad(swap, (0, 0, img.shape[2] - 512, img.shape[1] - 512))
-            swap = v2.functional.affine(
-                swap, tform.inverse.rotation * 57.2958,
-                (tform.inverse.translation[0], tform.inverse.translation[1]),
-                tform.inverse.scale, 0,
-                interpolation=v2.InterpolationMode.BILINEAR, center=(0, 0)
-            )
-            swap = swap[:, top:bottom, left:right]
-            swap = swap.permute(1, 2, 0)
-
-            # Pad and transform the mask
-            swap_mask = v2.functional.pad(swap_mask, (0, 0, img.shape[2] - 512, img.shape[1] - 512))
-            swap_mask = v2.functional.affine(
-                swap_mask, tform.inverse.rotation * 57.2958,
-                (tform.inverse.translation[0], tform.inverse.translation[1]),
-                tform.inverse.scale, 0,
-                interpolation=v2.InterpolationMode.BILINEAR, center=(0, 0)
-            )
-            swap_mask = swap_mask[:, top:bottom, left:right]
-            swap_mask = swap_mask.permute(1, 2, 0)
-
-            # Normalize the mask for blending (1 for swap, 0 for original)
-            swap_mask = swap_mask / 255.0
-
-            # Extract the crop from the original image
-            img_crop = img[0:3, top:bottom, left:right]
-            img_crop = img_crop.permute(1, 2, 0)
-
-            # Blend the swapped face and the original image
-            blended_crop = swap * swap_mask + img_crop * (1 - swap_mask)
-
-            # Ensure the result is within the valid range and data type
-            blended_crop = torch.clamp(blended_crop, 0, 255).type(torch.uint8)
-
-            # Replace the original image crop with the blended result
-            blended_crop = blended_crop.permute(2, 0, 1)
-            img[0:3, top:bottom, left:right] = blended_crop
-
-            return img
+            output = swapper_output.clone()
 
         if swapper_model == 'Inswapper128':
             for k in range(itex):
@@ -1185,6 +1133,8 @@ class VideoManager():
                 input_face_affined = output.clone()
                 output = torch.mul(output, 255)
                 output = torch.clamp(output, 0, 255)
+
+            show_image(output)
 
         elif swapper_model == 'SimSwap512':
             for k in range(itex):
