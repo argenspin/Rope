@@ -3,6 +3,12 @@ import requests
 from tqdm import tqdm
 from pathlib import Path
 
+import subprocess
+import sys
+
+def install_requirements():
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "-r", "requirements.txt"])
+
 def get_filename_from_link(file_link):
     return f"models\{file_link.split(r'/')[-1]}"
 
@@ -34,4 +40,5 @@ for link in model_links:
     download_file(link)
 
 ''' Additional Functions to execute when updating'''
+install_requirements()
 pass
