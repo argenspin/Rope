@@ -8,7 +8,6 @@
 *.profile
 *.timing
 *.dfm
-xlib/
 saved_parameters*.json
 startup_parameters*.json
 data.json
