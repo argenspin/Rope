@@ -27,7 +27,7 @@ from tkinter import messagebox
 
 from os import listdir
 from os.path import isfile, join
-
+import platform
 import inspect #print(inspect.currentframe().f_back.f_code.co_name, 'resize_image')
 from platform import system
 
@@ -1124,6 +1124,9 @@ class GUI(tk.Tk):
         row = row + 1
         self.widget['DFLXSegSlider'] = GE.Slider2(self.layer['parameters_frame'], 'DFLXSegSlider', 'Size', 3, self.update_data, 'parameter', 398, 20, row, 0, padx, pady, 0.62)
 
+        # DFL AMP Morph Factor
+        row = row + 1
+        self.widget['DFLAmpMorphSlider'] = GE.Slider2(self.layer['parameters_frame'], 'DFLAmpMorphSlider', 'DFL AMP Morph Factor', 3, self.update_data, 'parameter', 398, 20, row, 0, padx, pady, 0.62)
         # CLIP
         row = row + 1
         self.widget['CLIPSwitch'] = GE.Switch2(self.layer['parameters_frame'], 'CLIPSwitch', 'Text-Based Masking', 3, self.update_data, 'parameter', 398, 20, row, 0, padx, pady)
@@ -1717,7 +1720,6 @@ class GUI(tk.Tk):
 
         self.populate_target_videos()
         self.load_input_faces()
-        self.load_dfl_input_models()
 
         self.widget['StartButton'].enable_button()
 
@@ -1747,6 +1749,7 @@ class GUI(tk.Tk):
         self.widget['OutputFolderButton'].set(False, request_frame=False)
         self.add_action("saved_video_path",self.json_dict["saved videos"])
 
+
     def select_faces_path(self):
         temp = self.json_dict["source faces"]
         self.json_dict["source faces"] = filedialog.askdirectory(title="Select Source Faces Folder", initialdir=temp)
@@ -1760,9 +1763,10 @@ class GUI(tk.Tk):
         self.widget['FacesFolderButton'].set(False, request_frame=False)
         self.load_input_faces()
 
+
     def load_dfl_input_models(self):
-        dfl_models = []
-        dfl_models_dir = './dfl_models'
+        text_font = font.Font(family="Helvetica", size=10)
+        dfl_models_dir = 'dfl_models'
         j=len(self.source_faces)
         for model_file in listdir(dfl_models_dir):
             if model_file=='.gitkeep':
@@ -1776,55 +1780,77 @@ class GUI(tk.Tk):
             new_source_face['DFLModelPath'] = f'{dfl_models_dir}/{model_file}'
 
             button_text = f"(DFM) {model_file.split('.')[0]}"
-            text_font = font.Font(family="Helvetica", size=10)
 
             # Measure the text width
-            text_width = text_font.measure(button_text)
-            new_source_face["TKButton"] = tk.Button(self.merged_faces_canvas, style.media_button_off_3, image=self.blank, text=button_text, height=14, width=text_width, compound='left')
+            # text_width = text_font.measure(button_text)
+            text_width = text_font.measure('ABCDEFGHIJKLMNO')
+            new_source_face["TKButton"] = tk.Button(self.merged_faces_canvas, style.media_button_off_3, image=self.blank, text=button_text, height=14, width=text_width, compound='left', anchor='w')
 
             new_source_face["TKButton"].bind("<ButtonRelease-1>", lambda event, arg=j: self.select_input_faces(event, arg))
             new_source_face["TKButton"].bind("<MouseWheel>", lambda event: self.merged_faces_canvas.xview_scroll(-int(event.delta/120.0), "units"))
-
-            self.merged_faces_canvas.create_window((j//4)*92,8+(22*(j%4)), window = new_source_face["TKButton"],anchor='nw')
+            new_source_face['TextWidth'] = text_width
+            x_width = 20
+            if len(self.source_faces)>0:
+                x_width += self.get_adjacent_element_width(j)
+            new_source_face['XCoord'] = x_width
+            self.merged_faces_canvas.create_window(x_width,8+(22*(j%4)), window = new_source_face["TKButton"],anchor='nw')
             self.source_faces.append(new_source_face)
             j+=1
         pass
 
+    def get_adjacent_element_width(self, cur_index=0):
+        x_width = 0
+        if len(self.source_faces)>=4 and cur_index>=4:
+            adjacent_elem_index = cur_index - 4
+            x_width = self.source_faces[adjacent_elem_index].get('XCoord',0) + self.source_faces[adjacent_elem_index].get('TextWidth',0)
+        return x_width
     def load_input_faces(self):
         self.source_faces = []
         self.merged_faces_canvas.delete("all")
         self.source_faces_canvas.delete("all")
 
 
+        text_font = font.Font(family="Helvetica", size=10)
 
         # First load merged embeddings
         try:
             temp0 = []
-            with open("merged_embeddings.txt", "r") as embedfile:
-                temp = embedfile.read().splitlines()
+            try:
+                with open("merged_embeddings.txt", "r") as embedfile:
+                    temp = embedfile.read().splitlines()
 
-                for i in range(0, len(temp), 513):
-                    to = [temp[i][6:], np.array(temp[i+1:i+513], dtype='float32')]
-                    temp0.append(to)
+                    for i in range(0, len(temp), 513):
+                        to = [temp[i][6:], np.array(temp[i+1:i+513], dtype='float32')]
+                        temp0.append(to)
+            except:
+                pass
 
             for j in range(len(temp0)):
                 new_source_face = self.source_face.copy()
+
+                new_source_face["ButtonState"] = False
+                new_source_face["Embedding"] = temp0[j][1]
+
+                text_width = text_font.measure('ABCDEFGHIJKLMNO')
+
+                new_source_face["TKButton"] = tk.Button(self.merged_faces_canvas, style.media_button_off_3, image=self.blank, text=temp0[j][0], height=14, width=text_width, compound='left', anchor='w')
+
+                new_source_face["TKButton"].bind("<ButtonRelease-1>", lambda event, arg=j: self.select_input_faces(event, arg))
+                new_source_face["TKButton"].bind("<MouseWheel>", lambda event: self.merged_faces_canvas.xview_scroll(-int(event.delta/120.0), "units"))
+                new_source_face['TextWidth'] = text_width
+                x_width = 20
+                if len(self.source_faces)>0:
+                    x_width += self.get_adjacent_element_width(j)
+                new_source_face['XCoord'] = x_width
+                self.merged_faces_canvas.create_window(x_width,8+(22*(j%4)), window = new_source_face["TKButton"],anchor='nw')
                 self.source_faces.append(new_source_face)
 
-                self.source_faces[j]["ButtonState"] = False
-                self.source_faces[j]["Embedding"] = temp0[j][1]
-
-                self.source_faces[j]["TKButton"] = tk.Button(self.merged_faces_canvas, style.media_button_off_3, image=self.blank, text=temp0[j][0], height=14, width=84, compound='left')
-
-                self.source_faces[j]["TKButton"].bind("<ButtonRelease-1>", lambda event, arg=j: self.select_input_faces(event, arg))
-                self.source_faces[j]["TKButton"].bind("<MouseWheel>", lambda event: self.merged_faces_canvas.xview_scroll(-int(event.delta/120.0), "units"))
-
-                self.merged_faces_canvas.create_window((j//4)*92,8+(22*(j%4)), window = self.source_faces[j]["TKButton"],anchor='nw')
+            self.load_dfl_input_models()
 
             self.merged_faces_canvas.configure(scrollregion = self.merged_faces_canvas.bbox("all"))
             self.merged_faces_canvas.xview_moveto(0)
 
-        except:
+        except Exception as e:
             pass
 
         self.shift_i_len = len(self.source_faces)
@@ -2080,7 +2106,13 @@ class GUI(tk.Tk):
         #Webcam setup
         try:
             for i in range(self.parameters['WebCamMaxNoSlider']):
-                camera_capture = cv2.VideoCapture(i, cv2.CAP_DSHOW)
+                if platform.system == 'Windows':
+                    try:
+                        camera_capture = cv2.VideoCapture(i, cv2.CAP_DSHOW)
+                    except:
+                        camera_capture = cv2.VideoCapture(i)
+                else:
+                    camera_capture = cv2.VideoCapture(i)
                 success, webcam_frame = camera_capture.read()
                 ratio = float(webcam_frame.shape[0]) / webcam_frame.shape[1]
 

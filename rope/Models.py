@@ -295,6 +295,7 @@ class Models():
         self.model_xseg = []
         self.faceparser_model = []
         self.dfl_model = []
+        self.dfl_models = {}
 
     def run_recognize(self, img, kps, similarity_type='Opal', face_swapper_model='Inswapper128'):
         if face_swapper_model == 'Inswapper128':

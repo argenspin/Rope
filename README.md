@@ -10,6 +10,7 @@ For a full list of features and details, please visit the original project [page
 * Supports sending the swapped video as Virtual Camera output (in realtime) which can be used in external applications like Google Meet, Zoom, Twitch etc..
 * Integrates Rope with OBS Studio for real-time recording with microphone or computer audio
 * Eyes and Mouth restoration from the original face (Blend the Eyes and Mouth from original face with the swapped face to preserve expressions)
+* Supports using Deepfacelive models for swapping
 
 ## Requirements
   * Windows 10 or 11
@@ -84,7 +85,9 @@ python -m pip install -r requirements.txt
    - Close OBS.
 
 7. Start the application by running ***Rope_Conda.bat*** file
-  
+
+
+ **Note: To use DFL models for swapping, put you models (.dfm) to the dfl_models directory**
 ### Disclaimer: ###
 Rope is a personal project that I'm making available to the community as a thank you for all of the contributors ahead of me.
 I've copied the disclaimer from [Swap-Mukham](https://github.com/harisreedhar/Swap-Mukham) here since it is well-written and applies 100% to this repo.
