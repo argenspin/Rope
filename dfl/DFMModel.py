@@ -6,8 +6,6 @@ import onnxruntime
 from dfl.xlib.image import ImageProcessor
 
 
-
-
 def get_dims(img: np.ndarray) -> tuple:
     """Returns the dimensions of the image (N, H, W, C)."""
     if img.ndim == 2:
@@ -103,7 +101,7 @@ class DFMModel:
     def has_morph_value(self) -> bool:
         return self._model_type == 2
 
-    def convert(self, img, morph_factor=0.75):
+    def convert(self, img, morph_factor=0.75, rct=False):
         """
          img    np.ndarray  HW,HWC,NHWC uint8,float32
 
@@ -118,8 +116,7 @@ class DFMModel:
 
         img = img[:, :, ::-1]
         # img = np.rot90(img, k=3)
-        # plt.imshow(img)
-        # plt.show()
+
 
         ip = ImageProcessor(img)
 
@@ -127,6 +124,7 @@ class DFMModel:
         dtype = ip.get_dtype()
 
         img = ip.resize( (self._input_width,self._input_height) ).ch(3).to_ufloat32().get_image('NHWC')
+
 
         if self._model_type == 1:
             out_face_mask, out_celeb, out_celeb_mask = self._sess.run(None, {'in_face:0': img})
@@ -137,8 +135,26 @@ class DFMModel:
         out_celeb_mask = ImageProcessor(out_celeb_mask).resize((W,H)).ch(1).to_dtype(dtype).get_image('NHWC')
         out_face_mask  = ImageProcessor(out_face_mask).resize((W,H)).ch(1).to_dtype(dtype).get_image('NHWC')
 
-        out_celeb = ImageProcessor(out_celeb).get_image('HWC')
-        out_celeb = out_celeb[:, :, ::-1]
+
+        out_face_mask = ImageProcessor(out_face_mask).get_image('HWC')
+        out_face_mask = out_face_mask[:, :, ::-1]
+
+        if rct:
+            out_celeb = ImageProcessor(out_celeb).rct(ImageProcessor(img).resize((W,H)).get_image('NHWC'), out_celeb_mask, out_celeb_mask, 0.3)
+            out_celeb = out_celeb.get_image('HWC')
+            out_celeb = out_celeb[:, :, ::-1]
+        # plt.imshow(out_celeb_rct)
+        # plt.show()
+        else:
+            out_celeb = ImageProcessor(out_celeb).get_image('HWC')
+            out_celeb = out_celeb[:, :, ::-1]
+        # plt.imshow(out_celeb)
+        # plt.show()
+
+        out_celeb_mask = ImageProcessor(out_celeb_mask).get_image('HWC')
+        out_celeb_mask = out_celeb_mask[:, :, ::-1]
+
+        
         return out_celeb, out_celeb_mask, out_face_mask
     
     def get_fai_ip(self, img):

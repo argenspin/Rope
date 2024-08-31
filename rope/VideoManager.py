@@ -1107,7 +1107,7 @@ class VideoManager():
             test_swap = fai_ip.get_image('HWC')
 
             # Convert and obtain outputs
-            out_celeb, out_celeb_mask, out_face_mask = dfl_model.convert(test_swap, self.parameters['DFLAmpMorphSlider']/100)
+            out_celeb, out_celeb_mask, out_face_mask = dfl_model.convert(test_swap, parameters['DFLAmpMorphSlider']/100, rct=parameters['DFLRCTColorSwitch'])
 
             swapper_output = torch.from_numpy(out_celeb.copy()).cuda()
             # swapper_output = swapper_output.permute(1, 2, 0)

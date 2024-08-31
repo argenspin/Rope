@@ -31,6 +31,7 @@ import platform
 import inspect #print(inspect.currentframe().f_back.f_code.co_name, 'resize_image')
 from platform import system
 
+import gc
 # Face Landmarks
 class FaceLandmarks:
     def __init__(self, widget = {}, parameters = {}, add_action = {}):
@@ -1124,9 +1125,17 @@ class GUI(tk.Tk):
         row = row + 1
         self.widget['DFLXSegSlider'] = GE.Slider2(self.layer['parameters_frame'], 'DFLXSegSlider', 'Size', 3, self.update_data, 'parameter', 398, 20, row, 0, padx, pady, 0.62)
 
+        # DFL RCT Color Transfer
+        row = row + 1
+        self.widget['DFLRCTColorSwitch'] = GE.Switch2(self.layer['parameters_frame'], 'DFLRCTColorSwitch', 'DFL RCT Color Transfer', 3, self.update_data, 'parameter', 398, 20, row, 0, padx, pady+5)
+
+        # DFL Load only one Model
+        row = row + 1
+        self.widget['DFLLoadOnlyOneSwitch'] = GE.Switch2(self.layer['parameters_frame'], 'DFLLoadOnlyOneSwitch', 'DFL Keep Only Single Model in Memory', 3, self.update_data, 'parameter', 398, 20, row, 0, padx, pady+5)
+
         # DFL AMP Morph Factor
         row = row + 1
-        self.widget['DFLAmpMorphSlider'] = GE.Slider2(self.layer['parameters_frame'], 'DFLAmpMorphSlider', 'DFL AMP Morph Factor', 3, self.update_data, 'parameter', 398, 20, row, 0, padx, pady, 0.62)
+        self.widget['DFLAmpMorphSlider'] = GE.Slider2(self.layer['parameters_frame'], 'DFLAmpMorphSlider', 'DFL AMP Morph Factor', 3, self.update_data, 'parameter', 398, 20, row, 0, padx, pady+5, 0.62)
         # CLIP
         row = row + 1
         self.widget['CLIPSwitch'] = GE.Switch2(self.layer['parameters_frame'], 'CLIPSwitch', 'Text-Based Masking', 3, self.update_data, 'parameter', 398, 20, row, 0, padx, pady)
@@ -2081,6 +2090,12 @@ class GUI(tk.Tk):
                         temp_holder.append(self.source_faces[j]['Embedding'])
 
                         if self.source_faces[j]['DFLModel']:
+                            # Clear DFL models from memory
+                            if self.models.dfl_models and self.parameters['DFLLoadOnlyOneSwitch']:
+                                for model in list(self.models.dfl_models):
+                                    del self.models.dfl_models[model]._sess
+                                    del self.models.dfl_models[model]
+                                gc.collect()
                             tface['DFLModel'] = self.source_faces[j]['DFLModel']
                 # do averaging
                 if temp_holder:
