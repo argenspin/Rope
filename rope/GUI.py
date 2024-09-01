@@ -2038,6 +2038,8 @@ class GUI(tk.Tk):
         except:
             modifier = event
 
+
+
         # If autoswap isnt on
         # Clear all the highlights. Clear all states, excpet if a modifier is being used
         # Start by turning off all the highlights on the input faces buttons
@@ -2055,8 +2057,23 @@ class GUI(tk.Tk):
 
             # if shift find any other input faces and activate the state of all faces in between
             if modifier == 'shift':
+
+                # Check if there is any dfl models already selected.
+                if self.source_faces[button]["DFLModel"]:
+                    for i in range(len(self.source_faces)):
+                        if i==button:
+                            continue
+                        if self.source_faces[i]["ButtonState"] and self.source_faces[i]['DFLModel'] :
+                            self.source_faces[button]["ButtonState"] = False
+                            messagebox.showinfo('You cannot combine DFL Models!','You cannot combine DFL Models!')
+                            for face in self.source_faces:
+                                face['ButtonState'] = False
+                            break
+
+
                 for i in range(button-1, self.shift_i_len-1, -1):
                     if self.source_faces[i]["ButtonState"]:
+
                         for j in range(i, button, 1):
                             self.source_faces[j]["ButtonState"] = True
                         break
@@ -2087,7 +2104,9 @@ class GUI(tk.Tk):
                     # If the source face is active
                     if self.source_faces[j]["ButtonState"]:
                         tface["SourceFaceAssignments"].append(j)
-                        temp_holder.append(self.source_faces[j]['Embedding'])
+                        # Only append embedding if it is not a DFL model
+                        if not self.source_faces[j]['DFLModel']:
+                            temp_holder.append(self.source_faces[j]['Embedding'])
 
                         if self.source_faces[j]['DFLModel']:
                             # Clear DFL models from memory
@@ -2105,6 +2124,8 @@ class GUI(tk.Tk):
                         tface['AssignedEmbedding'] = np.mean(temp_holder, 0)
 
                     self.temp_emb = tface['AssignedEmbedding']
+                else:
+                    tface['AssignedEmbedding'] = []
 
                     # for k in range(512):
                     #     self.widget['emb_vec_' + str(k)].set(tface['AssignedEmbedding'][k], False)

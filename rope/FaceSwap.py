@@ -62,7 +62,8 @@ def get_resized_faces(img, tform, t512, t256, t128):
 
 def get_input_face_latent_and_dim(self, s_e, t_e, parameters, swapper_model, dfl_model, original_face_512, original_face_256, original_face_128):
     if dfl_model:
-        latent = torch.from_numpy(self.models.calc_swapper_latent_dfl(s_e)).float().to('cuda')
+        latent = []
+        # latent = torch.from_numpy(self.models.calc_swapper_latent_dfl(s_e)).float().to('cuda')
         input_face_affined = original_face_512
         dim = 4
 

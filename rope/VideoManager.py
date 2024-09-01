@@ -976,9 +976,12 @@ class VideoManager():
 
     # @profile
     def swap_core(self, img, kps, s_e, t_e, parameters, control, dfl_model=False): # img = RGB
+        # import matplotlib.pyplot as plt
+
         swapper_model = parameters['FaceSwapperModelTextSel']
 
         if dfl_model:
+            print('se',s_e)
             if not self.models.dfl_models.get(dfl_model):
                 try:
                     self.models.dfl_models[dfl_model] = DFMModel(f'./dfl_models/{dfl_model}', self.models.providers)
@@ -1009,10 +1012,16 @@ class VideoManager():
         input_face_affined = input_face_affined.permute(1, 2, 0)
         input_face_affined = torch.div(input_face_affined, 255.0)
 
+        # plt.imshow(input_face_affined.cpu())
+        # plt.show()
+
         if dfl_model:
             input_face_affined, output, prev_face = Swapper.process_dfl_swap(dfl_model, input_face_affined, original_face_512, parameters)
         else:
             input_face_affined, output, prev_face, dim = Swapper.process_face_swapping(self, input_face_affined, latent, swapper_model, itex)
+        
+        # plt.imshow(input_face_affined.cpu())
+        # plt.show()
 
         output = output.permute(2, 0, 1)
         swap = t512(output)
