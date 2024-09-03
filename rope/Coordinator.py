@@ -114,6 +114,11 @@ def coordinator():
             vm.parameters = action[0][1]
             action.pop(0)
 
+        # Face Editor
+        elif action [0][0] == "parameters_face_editor":
+            vm.parameters_face_editor = action[0][1]
+            action.pop(0)
+
         elif action [0][0] == "markers":
             vm.markers = action[0][1]
             action.pop(0)
@@ -148,6 +153,10 @@ def coordinator():
             gui.toggle_enhancer(0)
             action.pop(0)
 
+        elif action[0][0] == "clear_stop_faces_editor":
+            gui.toggle_faces_editor(0)
+            action.pop(0)
+
         elif action[0][0] == "set_slider_length":
             gui.set_video_slider_length(action[0][1])
             action.pop(0)
@@ -165,7 +174,11 @@ def coordinator():
             vm.face_landmarks = action[0][1]
             action.pop(0)
 
-         
+        # Face Editor
+        elif action[0][0] == "face_editor":
+            vm.face_editor = action[0][1]
+            action.pop(0)
+
         else:
             print("Action not found: "+action[0][0]+" "+str(action[0][1]))
             action.pop(0)

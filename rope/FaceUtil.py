@@ -1,5 +1,6 @@
 import cv2
 import math
+from math import sin, cos, acos, degrees
 import numpy as np
 from skimage import transform as trans
 import torch
@@ -44,12 +45,24 @@ arcface_src = np.array(
 arcface_src = np.expand_dims(arcface_src, axis=0)
 
 def pad_image_by_size(img, image_size):
-    w, h = math.ceil(img.size(dim=2)), math.ceil(img.size(dim=1))
-    if w < image_size or h < image_size:
-        pad_right = image_size - w
-        pad_bottom = image_size - h
-        # add right, bottom pading to the image if its size is less than image_size value
-        img = torch.nn.functional.pad(img, (0, pad_right, 0, pad_bottom), 'constant', 0)
+    # Se image_size non è una tupla, crea una tupla con altezza e larghezza uguali
+    if not isinstance(image_size, tuple):
+        image_size = (image_size, image_size)
+
+    # Larghezza e altezza dell'immagine
+    w, h = img.size(dim=2), img.size(dim=1)
+
+    # Dimensioni target
+    target_h, target_w = image_size
+
+    # Verifica se la larghezza o l'altezza è inferiore alle dimensioni target
+    if w < target_w or h < target_h:
+        # Calcolo del padding necessario a destra e in basso
+        pad_right = max(target_w - w, 0)  # Assicura che il padding sia non negativo
+        pad_bottom = max(target_h - h, 0)  # Assicura che il padding sia non negativo
+
+        # Aggiungi padding all'immagine (pad_left, pad_right, pad_top, pad_bottom)
+        img = torch.nn.functional.pad(img, (0, pad_right, 0, pad_bottom), mode='constant', value=0)
 
     return img
 
@@ -426,9 +439,13 @@ def getRotationMatrix2D(center, output_size, scale, rotation, is_clockwise = Tru
     return M
 
 def invertAffineTransform(M):
+    '''
     t = trans.SimilarityTransform()
     t.params[0:2] = M
     IM = t.inverse.params[0:2, :]
+    '''
+    M_H = np.vstack([M, np.array([0, 0, 1])])
+    IM = np.linalg.inv(M_H)
 
     return IM
 
@@ -514,24 +531,23 @@ def create_bounding_box_from_face_landmark_106_98_68(face_landmark_106_98_68):
     return bounding_box
 
 def convert_face_landmark_68_to_5(face_landmark_68, face_landmark_68_score):
-    face_landmark_5 = np.array(
-    [
-        np.mean(face_landmark_68[36:42], axis = 0),
-        np.mean(face_landmark_68[42:48], axis = 0),
-        face_landmark_68[30],
-        face_landmark_68[48],
-        face_landmark_68[54]
-    ])
+    lm_idx = np.array([31, 37, 40, 43, 46, 49, 55], dtype=np.int32) - 1
+    face_landmark_5 = np.stack([
+        np.mean(face_landmark_68[lm_idx[[1, 2]], :], 0),  # left eye
+        np.mean(face_landmark_68[lm_idx[[3, 4]], :], 0),  # right eye
+        face_landmark_68[lm_idx[0], :],  # nose
+        face_landmark_68[lm_idx[5], :],  # lip
+        face_landmark_68[lm_idx[6], :]   # lip
+    ], axis=0)
 
     if np.any(face_landmark_68_score):
-        face_landmark_5_score = np.array(
-        [
-            np.mean(face_landmark_68_score[36:42], axis = 0),
-            np.mean(face_landmark_68_score[42:48], axis = 0),
-            face_landmark_68_score[30],
-            face_landmark_68_score[48],
-            face_landmark_68_score[54]
-        ])
+        face_landmark_5_score = np.stack([
+            np.mean(face_landmark_68_score[lm_idx[[1, 2]], :], 0),  # left eye
+            np.mean(face_landmark_68_score[lm_idx[[3, 4]], :], 0),  # right eye
+            face_landmark_68_score[lm_idx[0], :],  # nose
+            face_landmark_68_score[lm_idx[5], :],  # lip
+            face_landmark_68_score[lm_idx[6], :]   # lip
+        ], axis=0)
     else:
         face_landmark_5_score = np.array([])
 
@@ -570,19 +586,58 @@ def convert_face_landmark_106_to_5(face_landmark_106):
 
     return face_landmark_5
 
-def convert_face_landmark_478_to_5(face_landmark_478):
-    face_landmark_5 = np.array(
-    [
-        face_landmark_478[468], # eye left
-        #np.array([(face_landmark_478[159][0] + face_landmark_478[145][0]) / 2, (face_landmark_478[159][1] + face_landmark_478[145][1]) / 2]), # eye left (145-159)
-        face_landmark_478[473], # eye-right
-        #np.array([(face_landmark_478[386][0] + face_landmark_478[374][0]) / 2, (face_landmark_478[386][1] + face_landmark_478[374][1]) / 2]), # eye-right (374-386)
-        face_landmark_478[4], # nose, 4, 1
-        face_landmark_478[61], # lip left ? 61, 57
-        face_landmark_478[291]  # lip right ? 291, 287
-    ])
+def convert_face_landmark_203_to_5(face_landmark_203, use_mean_eyes=False):
+    if use_mean_eyes:
+        eye_left = np.mean(face_landmark_203[[0, 6, 12, 18]], axis=0)  # Average of left eye points
+        eye_right = np.mean(face_landmark_203[[24, 30, 36, 42]], axis=0)  # Average of right eye points
+    else:
+        eye_left = face_landmark_203[197]  # Specific left eye point
+        eye_right = face_landmark_203[198]  # Specific right eye point
+
+    nose = face_landmark_203[201]  # Nose
+    lip_left = face_landmark_203[48]  # Left lip corner
+    lip_right = face_landmark_203[66]  # Right lip corner
+
+    face_landmark_5 = np.array([eye_left, eye_right, nose, lip_left, lip_right])
 
     return face_landmark_5
+
+def convert_face_landmark_478_to_5(face_landmark_478, use_mean_eyes=False):
+    if use_mean_eyes:
+        eye_left = np.mean(face_landmark_478[[472, 471, 470, 469]], axis=0)  # Average of left eye points
+        eye_right = np.mean(face_landmark_478[[477, 476, 475, 474]], axis=0)  # Average of right eye points
+    else:
+        eye_left = face_landmark_478[468]  # Specific left eye point
+        eye_right = face_landmark_478[473]  # Specific right eye point
+
+    nose = face_landmark_478[4]  # Nose
+    lip_left = face_landmark_478[61]  # Left lip corner
+    lip_right = face_landmark_478[291]  # Right lip corner
+
+    face_landmark_5 = np.array([eye_left, eye_right, nose, lip_left, lip_right])
+
+    return face_landmark_5
+
+def convert_face_landmark_x_to_5(pts, **kwargs):
+    pts_score = kwargs.get('pts_score', [])
+    use_mean_eyes = kwargs.get('use_mean_eyes', False)
+
+    if pts.shape[0] == 5:
+        return pts
+    elif pts.shape[0] == 68:
+        pt5 = convert_face_landmark_68_to_5(face_landmark_68=pts, face_landmark_68_score=pts_score)
+    elif pts.shape[0] == 98:
+        pt5 = convert_face_landmark_98_to_5(face_landmark_98=pts, face_landmark_98_score=pts_score)
+    elif pts.shape[0] == 106:
+        pt5 = convert_face_landmark_106_to_5(face_landmark_106=pts)
+    elif pts.shape[0] == 203:
+        pt5 = convert_face_landmark_203_to_5(face_landmark_203=pts, use_mean_eyes=use_mean_eyes)
+    elif pts.shape[0] == 478:
+        pt5 = convert_face_landmark_478_to_5(face_landmark_478=pts, use_mean_eyes=use_mean_eyes)
+    else:
+        raise Exception(f'Unknow shape: {pts.shape}')
+
+    return pt5
 
 def test_bbox_landmarks(img, bbox, kpss, caption='image', show_kpss_label=False):
         image = img.permute(1,2,0).to('cpu').numpy().copy()
@@ -598,17 +653,21 @@ def test_bbox_landmarks(img, bbox, kpss, caption='image', show_kpss_label=False)
                 cv2.circle(image, (kps[0], kps[1]), 1, color,
                            2)
                 if show_kpss_label:
-                    match i:
-                        case 0:
-                            text = "LE"
-                        case 1:
-                            text = "RE"
-                        case 2:
-                            text = "NO"
-                        case 3:
-                            text = "LM"
-                        case 4:
-                            text = "RM"
+                    if kpss.shape[0] == 5:
+                        match i:
+                            case 0:
+                                text = "LE"
+                            case 1:
+                                text = "RE"
+                            case 2:
+                                text = "NO"
+                            case 3:
+                                text = "LM"
+                            case 4:
+                                text = "RM"
+                    else:
+                        text = str(i)
+
                     image = cv2.putText(image, text, (kps[0], kps[1]), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2, cv2.LINE_AA, False)
 
         cv2.imshow(caption, image)
@@ -793,3 +852,692 @@ def lab_to_rgb(lab, normalize=False):
         rgb = torch.mul(rgb, 255.0)
 
     return rgb
+
+# Live Portrait
+#imported from https://github.com/KwaiVGI/LivePortrait/blob/main/src/utils/crop.py
+def parse_pt2_from_pt101(pt101, use_lip=True):
+    """
+    parsing the 2 points according to the 101 points, which cancels the roll
+    """
+    # the former version use the eye center, but it is not robust, now use interpolation
+    pt_left_eye = np.mean(pt101[[39, 42, 45, 48]], axis=0)  # left eye center
+    pt_right_eye = np.mean(pt101[[51, 54, 57, 60]], axis=0)  # right eye center
+
+    if use_lip:
+        # use lip
+        pt_center_eye = (pt_left_eye + pt_right_eye) / 2
+        pt_center_lip = (pt101[75] + pt101[81]) / 2
+        pt2 = np.stack([pt_center_eye, pt_center_lip], axis=0)
+    else:
+        pt2 = np.stack([pt_left_eye, pt_right_eye], axis=0)
+
+    return pt2
+
+def parse_pt2_from_pt98(pt98, use_lip=True, use_mean_eyes=False):
+    """
+    parsing the 2 points according to the 98 points, which cancels the roll
+    """
+    if use_mean_eyes:
+        pt_left_eye = np.mean(pt98[[66, 60, 62, 64]], axis=0)  # Average of left eye points
+        pt_right_eye = np.mean(pt98[[74, 68, 70, 72]], axis=0)  # Average of right eye points
+    else:
+        pt_left_eye = pt98[96] # Specific left eye point
+        pt_right_eye = pt98[97] # Specific right eye point
+
+    if use_lip:
+        # use lip
+        pt_center_eye = (pt_left_eye + pt_right_eye) / 2
+        pt_center_lip = (pt98[76] + pt98[82]) / 2
+        pt2 = np.stack([pt_center_eye, pt_center_lip], axis=0)
+    else:
+        pt2 = np.stack([pt_left_eye, pt_right_eye], axis=0)
+
+    return pt2
+
+#imported from https://github.com/KwaiVGI/LivePortrait/blob/main/src/utils/crop.py
+def parse_pt2_from_pt106(pt106, use_lip=True, use_mean_eyes=False):
+    """
+    parsing the 2 points according to the 106 points, which cancels the roll
+    """
+    if use_mean_eyes:
+        pt_left_eye = np.mean(pt106[[33, 35, 40, 39]], axis=0)  # Average of left eye points
+        pt_right_eye = np.mean(pt106[[87, 89, 94, 93]], axis=0)  # Average of right eye points
+    else:
+        pt_left_eye = pt106[38] # Specific left eye point
+        pt_right_eye = pt106[88] # Specific right eye point
+
+    if use_lip:
+        # use lip
+        pt_center_eye = (pt_left_eye + pt_right_eye) / 2
+        pt_center_lip = (pt106[52] + pt106[61]) / 2
+        pt2 = np.stack([pt_center_eye, pt_center_lip], axis=0)
+    else:
+        pt2 = np.stack([pt_left_eye, pt_right_eye], axis=0)
+
+    return pt2
+
+#imported from https://github.com/KwaiVGI/LivePortrait/blob/main/src/utils/crop.py
+def parse_pt2_from_pt203(pt203, use_lip=True, use_mean_eyes=False):
+    """
+    parsing the 2 points according to the 203 points, which cancels the roll
+    """
+    if use_mean_eyes:
+        pt_left_eye = np.mean(pt203[[0, 6, 12, 18]], axis=0)  # Average of left eye points
+        pt_right_eye = np.mean(pt203[[24, 30, 36, 42]], axis=0)  # Average of right eye points
+    else:
+        pt_left_eye = pt203[197]  # Specific left eye point
+        pt_right_eye = pt203[198]  # Specific right eye point
+
+    if use_lip:
+        # use lip
+        pt_center_eye = (pt_left_eye + pt_right_eye) / 2
+        pt_center_lip = (pt203[48] + pt203[66]) / 2
+        pt2 = np.stack([pt_center_eye, pt_center_lip], axis=0)
+    else:
+        pt2 = np.stack([pt_left_eye, pt_right_eye], axis=0)
+
+    return pt2
+
+def parse_pt2_from_pt478(pt478, use_lip=True, use_mean_eyes=False):
+    """
+    parsing the 2 points according to the 203 points, which cancels the roll
+    """
+    if use_mean_eyes:
+        pt_left_eye = np.mean(pt478[[472, 471, 470, 469]], axis=0)  # Average of left eye points
+        pt_right_eye = np.mean(pt478[[477, 476, 475, 474]], axis=0)  # Average of right eye points
+    else:
+        pt_left_eye = pt478[468]  # Specific left eye point
+        pt_right_eye = pt478[473]  # Specific right eye point
+
+    if use_lip:
+        # use lip
+        pt_center_eye = (pt_left_eye + pt_right_eye) / 2
+        pt_center_lip = (pt478[61] + pt478[291]) / 2
+        pt2 = np.stack([pt_center_eye, pt_center_lip], axis=0)
+    else:
+        pt2 = np.stack([pt_left_eye, pt_right_eye], axis=0)
+
+    return pt2
+
+def parse_pt2_from_pt68(pt68, use_lip=True):
+    """
+    parsing the 2 points according to the 68 points, which cancels the roll
+    """
+    lm_idx = np.array([31, 37, 40, 43, 46, 49, 55], dtype=np.int32) - 1
+    if use_lip:
+        pt5 = np.stack([
+            np.mean(pt68[lm_idx[[1, 2]], :], 0),  # left eye
+            np.mean(pt68[lm_idx[[3, 4]], :], 0),  # right eye
+            pt68[lm_idx[0], :],  # nose
+            pt68[lm_idx[5], :],  # lip
+            pt68[lm_idx[6], :]   # lip
+        ], axis=0)
+
+        pt2 = np.stack([
+            (pt5[0] + pt5[1]) / 2,
+            (pt5[3] + pt5[4]) / 2
+        ], axis=0)
+    else:
+        pt2 = np.stack([
+            np.mean(pt68[lm_idx[[1, 2]], :], 0),  # left eye
+            np.mean(pt68[lm_idx[[3, 4]], :], 0),  # right eye
+        ], axis=0)
+
+    return pt2
+
+def parse_pt2_from_pt5(pt5, use_lip=True):
+    """
+    parsing the 2 points according to the 5 points, which cancels the roll
+    """
+    pt_left_eye = pt5[0] # Specific left eye point
+    pt_right_eye = pt5[1] # Specific right eye point
+
+    if use_lip:
+        # use lip
+        pt_center_eye = (pt_left_eye + pt_right_eye) / 2
+        pt_center_lip = (pt5[3] + pt5[4]) / 2
+        pt2 = np.stack([pt_center_eye, pt_center_lip], axis=0)
+    else:
+        pt2 = np.stack([pt_left_eye, pt_right_eye], axis=0)
+
+    return pt2
+
+def parse_pt2_from_pt9(pt9, use_lip=True):
+    '''
+    parsing the 2 points according to the 9 points, which cancels the roll
+    ['right eye right', 'right eye left', 'left eye right', 'left eye left', 'nose tip', 'lip right', 'lip left', 'upper lip', 'lower lip']
+    '''
+    if use_lip:
+        pt9 = np.stack([
+            (pt9[2] + pt9[3]) / 2, # left eye
+            (pt9[0] + pt9[1]) / 2, # right eye
+            pt9[4],
+            (pt9[5] + pt9[6] ) / 2 # lip
+        ], axis=0)
+        pt2 = np.stack([
+            (pt9[0] + pt9[1]) / 2, # eye
+            pt9[3] # lip
+        ], axis=0)
+    else:
+        pt2 = np.stack([
+            (pt9[2] + pt9[3]) / 2,
+            (pt9[0] + pt9[1]) / 2,
+        ], axis=0)
+
+    return pt2
+
+#imported from https://github.com/KwaiVGI/LivePortrait/blob/main/src/utils/crop.py
+def parse_pt2_from_pt_x(pts, use_lip=True, use_mean_eyes=False):
+    if pts.shape[0] == 101:
+        pt2 = parse_pt2_from_pt101(pts, use_lip=use_lip)
+    elif pts.shape[0] == 106:
+        pt2 = parse_pt2_from_pt106(pts, use_lip=use_lip, use_mean_eyes=use_mean_eyes)
+    elif pts.shape[0] == 68:
+        pt2 = parse_pt2_from_pt68(pts, use_lip=use_lip)
+    elif pts.shape[0] == 5:
+        pt2 = parse_pt2_from_pt5(pts, use_lip=use_lip)
+    elif pts.shape[0] == 203:
+        pt2 = parse_pt2_from_pt203(pts, use_lip=use_lip, use_mean_eyes=use_mean_eyes)
+    elif pts.shape[0] == 98:
+        pt2 = parse_pt2_from_pt98(pts, use_lip=use_lip, use_mean_eyes=use_mean_eyes)
+    elif pts.shape[0] == 478:
+        pt2 = parse_pt2_from_pt478(pts, use_lip=use_lip, use_mean_eyes=use_mean_eyes)
+    elif pts.shape[0] > 101:
+        # take the first 101 points
+        pt2 = parse_pt2_from_pt101(pts[:101], use_lip=use_lip)
+    elif pts.shape[0] == 9:
+        pt2 = parse_pt2_from_pt9(pts, use_lip=use_lip)
+    else:
+        raise Exception(f'Unknow shape: {pts.shape}')
+
+    if not use_lip:
+        # NOTE: to compile with the latter code, need to rotate the pt2 90 degrees clockwise manually
+        v = pt2[1] - pt2[0]
+        pt2[1, 0] = pt2[0, 0] - v[1]
+        pt2[1, 1] = pt2[0, 1] + v[0]
+
+    return pt2
+
+#imported from https://github.com/KwaiVGI/LivePortrait/blob/main/src/utils/crop.py
+def parse_rect_from_landmark(
+    pts,
+    scale=1.5,
+    need_square=True,
+    vx_ratio=0,
+    vy_ratio=0,
+    use_deg_flag=False,
+    **kwargs
+):
+    """parsing center, size, angle from 101/68/5/x landmarks
+    vx_ratio: the offset ratio along the pupil axis x-axis, multiplied by size
+    vy_ratio: the offset ratio along the pupil axis y-axis, multiplied by size, which is used to contain more forehead area
+
+    judge with pts.shape
+    """
+    pt2 = parse_pt2_from_pt_x(pts, use_lip=kwargs.get('use_lip', True), use_mean_eyes=kwargs.get('use_mean_eyes', False))
+
+    uy = pt2[1] - pt2[0]
+    l = np.linalg.norm(uy)
+    if l <= 1e-3:
+        uy = np.array([0, 1], dtype=np.float32)
+    else:
+        uy /= l
+    ux = np.array((uy[1], -uy[0]), dtype=np.float32)
+
+    # the rotation degree of the x-axis, the clockwise is positive, the counterclockwise is negative (image coordinate system)
+    # print(uy)
+    # print(ux)
+    angle = acos(ux[0])
+    if ux[1] < 0:
+        angle = -angle
+
+    # rotation matrix
+    M = np.array([ux, uy])
+
+    # calculate the size which contains the angle degree of the bbox, and the center
+    center0 = np.mean(pts, axis=0)
+    rpts = (pts - center0) @ M.T  # (M @ P.T).T = P @ M.T
+    lt_pt = np.min(rpts, axis=0)
+    rb_pt = np.max(rpts, axis=0)
+    center1 = (lt_pt + rb_pt) / 2
+
+    size = rb_pt - lt_pt
+    if need_square:
+        m = max(size[0], size[1])
+        size[0] = m
+        size[1] = m
+
+    size *= scale  # scale size
+    center = center0 + ux * center1[0] + uy * center1[1]  # counterclockwise rotation, equivalent to M.T @ center1.T
+    center = center + ux * (vx_ratio * size) + uy * \
+        (vy_ratio * size)  # considering the offset in vx and vy direction
+
+    if use_deg_flag:
+        angle = degrees(angle)
+
+    return center, size, angle
+
+#imported from https://github.com/KwaiVGI/LivePortrait/blob/main/src/utils/crop.py
+def _estimate_similar_transform_from_pts(
+    pts,
+    dsize,
+    scale=1.5,
+    vx_ratio=0,
+    vy_ratio=-0.1,
+    flag_do_rot=True,
+    **kwargs
+):
+    """ calculate the affine matrix of the cropped image from sparse points, the original image to the cropped image, the inverse is the cropped image to the original image
+    pts: landmark, 101 or 68 points or other points, Nx2
+    scale: the larger scale factor, the smaller face ratio
+    vx_ratio: x shift
+    vy_ratio: y shift, the smaller the y shift, the lower the face region
+    rot_flag: if it is true, conduct correction
+    """
+    center, size, angle = parse_rect_from_landmark(
+        pts, scale=scale, vx_ratio=vx_ratio, vy_ratio=vy_ratio,
+        use_lip=kwargs.get('use_lip', True),
+        use_mean_eyes=kwargs.get('use_mean_eyes', False)
+    )
+
+    s = dsize / size[0]  # scale
+    tgt_center = np.array([dsize / 2, dsize / 2], dtype=np.float32)  # center of dsize
+
+    if flag_do_rot:
+        costheta, sintheta = cos(angle), sin(angle)
+        cx, cy = center[0], center[1]  # ori center
+        tcx, tcy = tgt_center[0], tgt_center[1]  # target center
+        # need to infer
+        M_INV = np.array(
+            [[s * costheta, s * sintheta, tcx - s * (costheta * cx + sintheta * cy)],
+             [-s * sintheta, s * costheta, tcy - s * (-sintheta * cx + costheta * cy)]],
+            dtype=np.float32
+        )
+    else:
+        M_INV = np.array(
+            [[s, 0, tgt_center[0] - s * center[0]],
+             [0, s, tgt_center[1] - s * center[1]]],
+            dtype=np.float32
+        )
+
+    M_INV_H = np.vstack([M_INV, np.array([0, 0, 1])])
+    M = np.linalg.inv(M_INV_H)
+
+    # M_INV is from the original image to the cropped image, M is from the cropped image to the original image
+    return M_INV, M[:2, ...]
+
+def warp_face_by_face_landmark_x(img, pts, **kwargs):
+    dsize = kwargs.get('dsize', 224)  # 512
+    scale = kwargs.get('scale', 1.5)  # 1.5 | 1.6 | 2.5
+    vy_ratio = kwargs.get('vy_ratio', -0.1)  # -0.0625 | -0.1 | -0.125
+    interpolation = kwargs.get('interpolation', v2.InterpolationMode.BILINEAR)
+
+    # pad image by image size
+    img = pad_image_by_size(img, dsize)
+    #if pts.shape[0] == 5:
+    #    scale *= 2.20
+    #    vy_ratio += (-vy_ratio / 2.20)
+
+    M_o2c, M_c2o = _estimate_similar_transform_from_pts(
+        pts,
+        dsize=dsize,
+        scale=scale,
+        vy_ratio=vy_ratio,
+        flag_do_rot=kwargs.get('flag_do_rot', True),
+    )
+
+    t = trans.SimilarityTransform()
+    t.params[0:2] = M_o2c
+    img = v2.functional.affine(img, t.rotation*57.2958, translate=(t.translation[0], t.translation[1]), scale=t.scale, shear=(0.0, 0.0), interpolation=interpolation, center=(0, 0))
+    img = v2.functional.crop(img, 0,0, dsize, dsize)
+
+    return img, M_o2c, M_c2o
+
+def create_faded_inner_mask(size, border_thickness, fade_thickness, blur_radius=3, device='cuda'):
+    """
+    Create a mask with a thick black border and a faded white center towards the border (optimized version).
+    The white edges are smoothed using Gaussian blur.
+
+    Parameters:
+    - size: Tuple (height, width) for the mask size.
+    - border_thickness: The thickness of the outer black border.
+    - fade_thickness: The thickness over which the white center fades into the black border.
+    - blur_radius: The radius for the Gaussian blur to smooth the white edges.
+    - device: Device to perform the computation ('cuda' for GPU, 'cpu' for CPU).
+
+    Returns:
+    - mask: A PyTorch tensor containing the mask.
+    """
+    height, width = size
+    mask = torch.zeros((height, width), dtype=torch.float32, device=device)  # Start with a black mask
+
+    # Define the inner region
+    inner_start = border_thickness
+    inner_end_x = width - border_thickness
+    inner_end_y = height - border_thickness
+
+    # Create grid for distance calculations on the specified device
+    y_indices, x_indices = torch.meshgrid(torch.arange(height, device=device),
+                                          torch.arange(width, device=device), indexing='ij')
+
+    # Calculate distances to the nearest border for each point
+    dist_to_left = x_indices - inner_start
+    dist_to_right = inner_end_x - x_indices - 1
+    dist_to_top = y_indices - inner_start
+    dist_to_bottom = inner_end_y - y_indices - 1
+
+    # Calculate minimum distance to any border
+    dist_to_border = torch.minimum(torch.minimum(dist_to_left, dist_to_right),
+                                   torch.minimum(dist_to_top, dist_to_bottom))
+
+    # Mask inside the fading region
+    fade_region = (dist_to_border >= 0) & (dist_to_border < fade_thickness)
+    mask[fade_region] = dist_to_border[fade_region] / fade_thickness
+
+    # Mask in the full white region
+    white_region = dist_to_border >= fade_thickness
+    mask[white_region] = 1.0
+
+    # Apply Gaussian blur to smooth the white edges
+    mask = mask.unsqueeze(0).unsqueeze(0)  # Add batch and channel dimensions for Gaussian blur
+    mask = torchvision.transforms.functional.gaussian_blur(mask, kernel_size=(blur_radius, blur_radius), sigma=(blur_radius / 2))
+    mask = mask.squeeze()  # Remove extra dimensions
+
+    return mask
+
+#imported from https://github.com/KwaiVGI/LivePortrait/blob/main/src/utils/crop.py
+def prepare_paste_back(mask_crop, crop_M_c2o, dsize, interpolation=v2.InterpolationMode.BILINEAR):
+    """prepare mask for later image paste back
+    """
+    t = trans.SimilarityTransform()
+    t.params[0:2] = crop_M_c2o
+
+    # pad image by image size
+    mask_crop = pad_image_by_size(mask_crop, (dsize[0], dsize[1]))
+
+    mask_ori = v2.functional.affine(mask_crop, t.rotation*57.2958, translate=(t.translation[0], t.translation[1]), scale=t.scale, shear=(0.0, 0.0), interpolation=interpolation, center=(0, 0))
+    mask_ori = v2.functional.crop(mask_ori, 0,0, dsize[0], dsize[1]) # cols, rows
+    mask_ori = torch.div(mask_ori.type(torch.float32), 255.)
+
+    return mask_ori
+
+#imported from https://github.com/KwaiVGI/LivePortrait/blob/main/src/utils/crop.py
+def paste_back(img_crop, M_c2o, img_ori, mask_ori, interpolation=v2.InterpolationMode.BILINEAR):
+    """paste back the image
+    """
+    dsize = (img_ori.shape[1], img_ori.shape[2])
+    t = trans.SimilarityTransform()
+    t.params[0:2] = M_c2o
+
+    # pad image by image size
+    img_crop = pad_image_by_size(img_crop, (img_ori.shape[1], img_ori.shape[2]))
+
+    output = v2.functional.affine(img_crop, t.rotation*57.2958, translate=(t.translation[0], t.translation[1]), scale=t.scale, shear=(0.0, 0.0), interpolation=interpolation, center=(0, 0))
+    output = v2.functional.crop(output, 0,0, dsize[0], dsize[1]) # cols, rows
+
+    # Converti i tensor al tipo appropriato prima delle operazioni in-place
+    output = output.float()  # Converte output in torch.float32
+    mask_ori = mask_ori.float()  # Assicura che mask_ori sia float per operazioni compatibili
+    img_ori = img_ori.float()  # Assicura che img_ori sia float
+
+    # Ottimizzazione con operazioni in-place
+    output.mul_(mask_ori)  # In-place multiplication
+    output.add_(img_ori.mul_(1 - mask_ori))  # In-place addition and multiplication
+    output.clamp_(0, 255)  # In-place clamping
+    output = output.to(torch.uint8)
+
+    return output
+
+#imported from https://github.com/KwaiVGI/LivePortrait/blob/main/src/utils/live_portrait_wrapper.py
+def calculate_distance_ratio(lmk: np.ndarray, idx1: int, idx2: int, idx3: int, idx4: int, eps: float = 1e-6) -> np.ndarray:
+    return (np.linalg.norm(lmk[:, idx1] - lmk[:, idx2], axis=1, keepdims=True) /
+            (np.linalg.norm(lmk[:, idx3] - lmk[:, idx4], axis=1, keepdims=True) + eps))
+
+def calc_eye_close_ratio(lmk: np.ndarray, target_eye_ratio: np.ndarray = None) -> np.ndarray:
+    lefteye_close_ratio = calculate_distance_ratio(lmk, 6, 18, 0, 12)
+    righteye_close_ratio = calculate_distance_ratio(lmk, 30, 42, 24, 36)
+    if target_eye_ratio is not None:
+        return np.concatenate([lefteye_close_ratio, righteye_close_ratio, target_eye_ratio], axis=1)
+    else:
+        return np.concatenate([lefteye_close_ratio, righteye_close_ratio], axis=1)
+
+#imported from https://github.com/KwaiVGI/LivePortrait/blob/main/src/utils/live_portrait_wrapper.py
+def calc_lip_close_ratio(lmk: np.ndarray) -> np.ndarray:
+    return calculate_distance_ratio(lmk, 90, 102, 48, 66)
+
+#imported from https://github.com/KwaiVGI/LivePortrait/blob/main/src/utils/camera.py
+def headpose_pred_to_degree(pred):
+    """
+    pred: (bs, 66) or (bs, 1) or others
+    """
+    if pred.ndim > 1 and pred.shape[1] == 66:
+        # NOTE: note that the average is modified to 97.5
+        device = pred.device
+        idx_tensor = [idx for idx in range(0, 66)]
+        idx_tensor = torch.FloatTensor(idx_tensor).to(device)
+        pred = torch.nn.functional.softmax(pred, dim=1)
+        degree = torch.sum(pred*idx_tensor, axis=1) * 3 - 97.5
+
+        return degree
+
+    return pred
+
+#imported from https://github.com/KwaiVGI/LivePortrait/blob/main/src/utils/camera.py
+def get_rotation_matrix(pitch_, yaw_, roll_):
+    """ the input is in degree
+    """
+    # transform to radian
+    pitch = pitch_ / 180 * np.pi
+    yaw = yaw_ / 180 * np.pi
+    roll = roll_ / 180 * np.pi
+
+    device = pitch.device
+
+    if pitch.ndim == 1:
+        pitch = pitch.unsqueeze(1)
+    if yaw.ndim == 1:
+        yaw = yaw.unsqueeze(1)
+    if roll.ndim == 1:
+        roll = roll.unsqueeze(1)
+
+    # calculate the euler matrix
+    bs = pitch.shape[0]
+    ones = torch.ones([bs, 1]).to(device)
+    zeros = torch.zeros([bs, 1]).to(device)
+    x, y, z = pitch, yaw, roll
+
+    rot_x = torch.cat([
+        ones, zeros, zeros,
+        zeros, torch.cos(x), -torch.sin(x),
+        zeros, torch.sin(x), torch.cos(x)
+    ], dim=1).reshape([bs, 3, 3])
+
+    rot_y = torch.cat([
+        torch.cos(y), zeros, torch.sin(y),
+        zeros, ones, zeros,
+        -torch.sin(y), zeros, torch.cos(y)
+    ], dim=1).reshape([bs, 3, 3])
+
+    rot_z = torch.cat([
+        torch.cos(z), -torch.sin(z), zeros,
+        torch.sin(z), torch.cos(z), zeros,
+        zeros, zeros, ones
+    ], dim=1).reshape([bs, 3, 3])
+
+    rot = rot_z @ rot_y @ rot_x
+
+    return rot.permute(0, 2, 1)  # transpose
+
+#imported from https://github.com/KwaiVGI/LivePortrait/blob/main/src/utils/live_portrait_wrapper.py
+def transform_keypoint(kp_info: dict):
+    """
+    transform the implicit keypoints with the pose, shift, and expression deformation
+    kp: BxNx3
+    """
+    kp = kp_info['kp']    # (bs, k, 3)
+    pitch, yaw, roll = kp_info['pitch'], kp_info['yaw'], kp_info['roll']
+
+    t, exp = kp_info['t'], kp_info['exp']
+    scale = kp_info['scale']
+
+    pitch = headpose_pred_to_degree(pitch)
+    yaw = headpose_pred_to_degree(yaw)
+    roll = headpose_pred_to_degree(roll)
+
+    bs = kp.shape[0]
+    if kp.ndim == 2:
+        num_kp = kp.shape[1] // 3  # Bx(num_kpx3)
+    else:
+        num_kp = kp.shape[1]  # Bxnum_kpx3
+
+    rot_mat = get_rotation_matrix(pitch, yaw, roll)    # (bs, 3, 3)
+
+    # Eqn.2: s * (R * x_c,s + exp) + t
+    kp_transformed = kp.view(bs, num_kp, 3) @ rot_mat + exp.view(bs, num_kp, 3)
+    kp_transformed *= scale[..., None]  # (bs, k, 3) * (bs, 1, 1) = (bs, k, 3)
+    kp_transformed[:, :, 0:2] += t[:, None, 0:2]  # remove z, only apply tx ty
+
+    return kp_transformed
+
+#imported from https://github.com/KwaiVGI/LivePortrait/blob/main/src/gradio_pipeline.py
+@torch.no_grad()
+def update_delta_new_eyeball_direction(eyeball_direction_x, eyeball_direction_y, delta_new, **kwargs):
+    if eyeball_direction_x > 0:
+            delta_new[0, 11, 0] += eyeball_direction_x * 0.0007
+            delta_new[0, 15, 0] += eyeball_direction_x * 0.001
+    else:
+        delta_new[0, 11, 0] += eyeball_direction_x * 0.001
+        delta_new[0, 15, 0] += eyeball_direction_x * 0.0007
+
+    delta_new[0, 11, 1] += eyeball_direction_y * -0.001
+    delta_new[0, 15, 1] += eyeball_direction_y * -0.001
+    blink = -eyeball_direction_y / 2.
+
+    delta_new[0, 11, 1] += blink * -0.001
+    delta_new[0, 13, 1] += blink * 0.0003
+    delta_new[0, 15, 1] += blink * -0.001
+    delta_new[0, 16, 1] += blink * 0.0003
+
+    return delta_new
+
+#imported from https://github.com/KwaiVGI/LivePortrait/blob/main/src/gradio_pipeline.py
+@torch.no_grad()
+def update_delta_new_smile(smile, delta_new, **kwargs):
+    delta_new[0, 20, 1] += smile * -0.01
+    delta_new[0, 14, 1] += smile * -0.02
+    delta_new[0, 17, 1] += smile * 0.0065
+    delta_new[0, 17, 2] += smile * 0.003
+    delta_new[0, 13, 1] += smile * -0.00275
+    delta_new[0, 16, 1] += smile * -0.00275
+    delta_new[0, 3, 1] += smile * -0.0035
+    delta_new[0, 7, 1] += smile * -0.0035
+
+    return delta_new
+
+#imported from https://github.com/KwaiVGI/LivePortrait/blob/main/src/gradio_pipeline.py
+@torch.no_grad()
+def update_delta_new_wink(wink, delta_new, **kwargs):
+    delta_new[0, 11, 1] += wink * 0.001
+    delta_new[0, 13, 1] += wink * -0.0003
+    delta_new[0, 17, 0] += wink * 0.0003
+    delta_new[0, 17, 1] += wink * 0.0003
+    delta_new[0, 3, 1] += wink * -0.0003
+
+    return delta_new
+
+#imported from https://github.com/KwaiVGI/LivePortrait/blob/main/src/gradio_pipeline.py
+@torch.no_grad()
+def update_delta_new_eyebrow(eyebrow, delta_new, **kwargs):
+    if eyebrow > 0:
+        delta_new[0, 1, 1] += eyebrow * 0.001
+        delta_new[0, 2, 1] += eyebrow * -0.001
+    else:
+        delta_new[0, 1, 0] += eyebrow * -0.001
+        delta_new[0, 2, 0] += eyebrow * 0.001
+        delta_new[0, 1, 1] += eyebrow * 0.0003
+        delta_new[0, 2, 1] += eyebrow * -0.0003
+
+    return delta_new
+
+#imported from https://github.com/KwaiVGI/LivePortrait/blob/main/src/gradio_pipeline.py
+@torch.no_grad()
+def update_delta_new_lip_variation_zero(lip_variation_zero, delta_new, **kwargs):
+    delta_new[0, 19, 0] += lip_variation_zero
+
+    return delta_new
+
+#imported from https://github.com/KwaiVGI/LivePortrait/blob/main/src/gradio_pipeline.py
+@torch.no_grad()
+def update_delta_new_lip_variation_one(lip_variation_one, delta_new, **kwargs):
+    delta_new[0, 14, 1] += lip_variation_one * 0.001
+    delta_new[0, 3, 1] += lip_variation_one * -0.0005
+    delta_new[0, 7, 1] += lip_variation_one * -0.0005
+    delta_new[0, 17, 2] += lip_variation_one * -0.0005
+
+    return delta_new
+
+#imported from https://github.com/KwaiVGI/LivePortrait/blob/main/src/gradio_pipeline.py
+@torch.no_grad()
+def update_delta_new_lip_variation_two(lip_variation_two, delta_new, **kwargs):
+    delta_new[0, 20, 2] += lip_variation_two * -0.001
+    delta_new[0, 20, 1] += lip_variation_two * -0.001
+    delta_new[0, 14, 1] += lip_variation_two * -0.001
+
+    return delta_new
+
+#imported from https://github.com/KwaiVGI/LivePortrait/blob/main/src/gradio_pipeline.py
+@torch.no_grad()
+def update_delta_new_lip_variation_three(lip_variation_three, delta_new, **kwargs):
+    delta_new[0, 19, 1] += lip_variation_three * 0.001
+    delta_new[0, 19, 2] += lip_variation_three * 0.0001
+    delta_new[0, 17, 1] += lip_variation_three * -0.0001
+
+    return delta_new
+
+#imported from https://github.com/KwaiVGI/LivePortrait/blob/main/src/gradio_pipeline.py
+@torch.no_grad()
+def update_delta_new_mov_x(mov_x, delta_new, **kwargs):
+    delta_new[0, 5, 0] += mov_x
+
+    return delta_new
+
+#imported from https://github.com/KwaiVGI/LivePortrait/blob/main/src/gradio_pipeline.py
+@torch.no_grad()
+def update_delta_new_mov_y(mov_y, delta_new, **kwargs):
+    delta_new[0, 5, 1] += mov_y
+
+    return delta_new
+
+#imported from https://github.com/KwaiVGI/LivePortrait/blob/main/src/utils/live_portrait_wrapper.py
+def calc_combined_eye_ratio(c_d_eyes_i, source_lmk, device='cuda'):
+    c_s_eyes = calc_eye_close_ratio(source_lmk[None])
+    c_s_eyes_tensor = torch.from_numpy(c_s_eyes).float().to(device)
+    c_d_eyes_i_tensor = torch.Tensor([c_d_eyes_i[0][0]]).reshape(1, 1).to(device)
+    # [c_s,eyes, c_d,eyes,i]
+    combined_eye_ratio_tensor = torch.cat([c_s_eyes_tensor, c_d_eyes_i_tensor], dim=1)
+
+    return combined_eye_ratio_tensor
+
+#imported from https://github.com/KwaiVGI/LivePortrait/blob/main/src/utils/live_portrait_wrapper.py
+def calc_combined_lip_ratio(c_d_lip_i, source_lmk, device='cuda'):
+    c_s_lip = calc_lip_close_ratio(source_lmk[None])
+    c_s_lip_tensor = torch.from_numpy(c_s_lip).float().to(device)
+    c_d_lip_i_tensor = torch.Tensor([c_d_lip_i[0]]).to(device).reshape(1, 1) # 1x1
+    # [c_s,lip, c_d,lip,i]
+    combined_lip_ratio_tensor = torch.cat([c_s_lip_tensor, c_d_lip_i_tensor], dim=1) # 1x2
+
+    return combined_lip_ratio_tensor
+
+#imported from https://github.com/KwaiVGI/LivePortrait/blob/main/src/utils/helper.py
+def concat_feat(kp_source: torch.Tensor, kp_driving: torch.Tensor) -> torch.Tensor:
+    """
+    kp_source: (bs, k, 3)
+    kp_driving: (bs, k, 3)
+    Return: (bs, 2k*3)
+    """
+    bs_src = kp_source.shape[0]
+    bs_dri = kp_driving.shape[0]
+    assert bs_src == bs_dri, 'batch size must be equal'
+
+    feat = torch.cat([kp_source.view(bs_src, -1), kp_driving.view(bs_dri, -1)], dim=1)
+    return feat

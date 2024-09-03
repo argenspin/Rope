@@ -27,8 +27,8 @@ from tkinter import messagebox
 
 from os import listdir
 from os.path import isfile, join
-import platform
 import inspect #print(inspect.currentframe().f_back.f_code.co_name, 'resize_image')
+import platform
 from platform import system
 
 import gc
@@ -64,65 +64,187 @@ class FaceLandmarks:
     def remove_all_data(self):
         self.data = {}
 
-    def apply_landmarks_to_widget_and_parameters(self, frame_number, face_id):
+    def apply_max_face_id_to_widget(self, frame_number, value):
+        if self.widget and self.parameters and self.add_action:
+            if self.widget['FaceIDSlider'].set_max(value, False):
+                self.apply_changes_to_widget_and_parameters(frame_number, self.widget['FaceIDSlider'].get())
+
+                return True
+
+            return False
+
+    def apply_changes_to_widget_and_parameters(self, frame_number, face_id):
         if self.widget and self.parameters and self.add_action:
             landmarks = self.data.get(frame_number, {}).get(face_id, None)
             if landmarks is not None:
                 self.widget['FaceIDSlider'].set(face_id, request_frame=False)
                 self.parameters['FaceIDSlider'] = face_id
+
                 self.widget['EyeLeftXSlider'].set(landmarks[0][0], request_frame=False)
                 self.parameters['EyeLeftXSlider'] = landmarks[0][0]
+
                 self.widget['EyeLeftYSlider'].set(landmarks[0][1], request_frame=False)
                 self.parameters['EyeLeftYSlider'] = landmarks[0][1]
+
                 self.widget['EyeRightXSlider'].set(landmarks[1][0], request_frame=False)
                 self.parameters['EyeRightXSlider'] = landmarks[1][0]
+
                 self.widget['EyeRightYSlider'].set(landmarks[1][1], request_frame=False)
                 self.parameters['EyeRightYSlider'] = landmarks[1][1]
+
                 self.widget['NoseXSlider'].set(landmarks[2][0], request_frame=False)
                 self.parameters['NoseXSlider'] = landmarks[2][0]
+
                 self.widget['NoseYSlider'].set(landmarks[2][1], request_frame=False)
                 self.parameters['NoseYSlider'] = landmarks[2][1]
+
                 self.widget['MouthLeftXSlider'].set(landmarks[3][0], request_frame=False)
                 self.parameters['MouthLeftXSlider'] = landmarks[3][0]
+
                 self.widget['MouthLeftYSlider'].set(landmarks[3][1], request_frame=False)
                 self.parameters['MouthLeftYSlider'] = landmarks[3][1]
+
                 self.widget['MouthRightXSlider'].set(landmarks[4][0], request_frame=False)
                 self.parameters['MouthRightXSlider'] = landmarks[4][0]
+
                 self.widget['MouthRightYSlider'].set(landmarks[4][1], request_frame=False)
                 self.parameters['MouthRightYSlider'] = landmarks[4][1]
-                self.add_action('parameters', self.parameters)
+
             else:
-                self.widget['FaceIDSlider'].set(0, request_frame=False)
+                self.widget['FaceIDSlider'].set(1, request_frame=False)
                 self.parameters['FaceIDSlider'] = 1
+
                 self.widget['EyeLeftXSlider'].set(0, request_frame=False)
                 self.parameters['EyeLeftXSlider'] = 0
+
                 self.widget['EyeLeftYSlider'].set(0, request_frame=False)
                 self.parameters['EyeLeftYSlider'] = 0
+
                 self.widget['EyeRightXSlider'].set(0, request_frame=False)
                 self.parameters['EyeRightXSlider'] = 0
+
                 self.widget['EyeRightYSlider'].set(0, request_frame=False)
                 self.parameters['EyeRightYSlider'] = 0
+
                 self.widget['NoseXSlider'].set(0, request_frame=False)
                 self.parameters['NoseXSlider'] = 0
+
                 self.widget['NoseYSlider'].set(0, request_frame=False)
                 self.parameters['NoseYSlider'] = 0
+
                 self.widget['MouthLeftXSlider'].set(0, request_frame=False)
                 self.parameters['MouthLeftXSlider'] = 0
+
                 self.widget['MouthLeftYSlider'].set(0, request_frame=False)
                 self.parameters['MouthLeftYSlider'] = 0
+
                 self.widget['MouthRightXSlider'].set(0, request_frame=False)
                 self.parameters['MouthRightXSlider'] = 0
+
                 self.widget['MouthRightYSlider'].set(0, request_frame=False)
                 self.parameters['MouthRightYSlider'] = 0
-                self.add_action('parameters', self.parameters)
-#
+
+            self.add_action('parameters', self.parameters)
+
+# Face Editor
+class FaceEditor:
+    def __init__(self, widget=None, parameters=None, add_action=None):
+        self.data = {}
+        self.widget = widget or {}
+        self.parameters = parameters or {}
+        self.add_action = add_action or (lambda action, params: None)
+
+        # Default parameters for a face
+        self.default_parameters = [
+            'Human-Face', 2.50, 0.00, 0.00, 0, 0, 0, 0.00, 0.00, 1.00, 0.00, 0.00, 0.00, 0,
+            0.00, 0.00, 0.00, 0.00, 0.00
+        ]
+
+        # Map parameter names to widget keys
+        # Mappatura dei nomi dei widget agli indici dei parametri
+        self.parameter_map = {
+            "FaceEditorTypeTextSel": 0,
+            "CropScaleSlider": 1,
+            "EyesOpenRatioSlider": 2,
+            "LipsOpenRatioSlider": 3,
+            "HeadPitchSlider": 4,
+            "HeadYawSlider": 5,
+            "HeadRollSlider": 6,
+            "XAxisMovementSlider": 7,
+            "YAxisMovementSlider": 8,
+            "ZAxisMovementSlider": 9,
+            "MouthPoutingSlider": 10,
+            "MouthPursingSlider": 11,
+            "MouthGrinSlider": 12,
+            "LipsCloseOpenSlider": 13,
+            "MouthSmileSlider": 14,
+            "EyeWinkSlider": 15,
+            "EyeBrowsDirectionSlider": 16,
+            "EyeGazeHorizontalSlider": 17,
+            "EyeGazeVerticalSlider": 18
+        }
+
+    def add_parameters(self, frame_number, face_id, parameters):
+        if frame_number not in self.data:
+            self.data[frame_number] = {}
+        self.data[frame_number][face_id] = parameters
+
+    def get_parameters(self, frame_number, face_id):
+        return self.data.get(frame_number, {}).get(face_id, None)
+
+    def get_named_parameters(self, frame_number, face_id):
+        """
+        Restituisce una lista di tuple (nome_parametro, valore) per un dato frame e face_id.
+        """
+        parameters = self.get_parameters(frame_number, face_id) or self.default_parameters
+
+        # Crea un dizionario con i nomi dei parametri come chiavi e i loro valori
+        named_parameters = {name: parameters[index] for name, index in self.parameter_map.items()}
+
+        return named_parameters
+
+    def get_all_parameters_for_frame(self, frame_number):
+        return self.data.get(frame_number, {})
+
+    def reset_parameters_for_face_id(self, frame_number, face_id):
+        if frame_number in self.data and face_id in self.data[frame_number]:
+            self.data[frame_number][face_id] = self.default_parameters.copy()
+
+    def remove_all_parameters_for_frame(self, frame_number):
+        if frame_number in self.data:
+            self.data[frame_number] = {}
+
+    def remove_all_data(self):
+        self.data = {}
+
+    def apply_max_face_id_to_widget(self, frame_number, value):
+        if self.widget and self.parameters and self.add_action:
+            if self.widget['FaceEditorIDSlider'].set_max(value, False):
+                self.apply_changes_to_widget_and_parameters(frame_number, self.widget['FaceIDSlider'].get())
+
+                return True
+
+            return False
+
+    def apply_changes_to_widget_and_parameters(self, frame_number, face_id):
+        parameters = self.get_parameters(frame_number, face_id) or self.default_parameters
+        self.parameters['FaceEditorIDSlider'] = face_id
+        self.widget.get('FaceEditorIDSlider', {}).set(face_id, request_frame=False)
+
+        for i, param_key in enumerate(self.parameter_map):
+            value = parameters[i]
+            if param_key in self.widget:
+                self.widget[param_key].set(value, request_frame=False)
+            self.parameters[param_key] = value
+
+        self.add_action('parameters_face_editor', self.parameters)
 
 class GUI(tk.Tk):
     def __init__(self, models):
         super().__init__()
 
         self.models = models
-        self.title('Rope-Pearl-00')
+        self.title('Rope-Next-00')
         self.target_media = []
         self.target_video_file = []
         self.action_q = []
@@ -154,6 +276,8 @@ class GUI(tk.Tk):
         self.me_name = []
         self.merged_faces_canvas = []
         self.parameters = {}
+        # Face Editor
+        self.parameters_face_editor = {}
         self.control = {}
         self.widget = {}
         self.static_widget = {}
@@ -195,7 +319,6 @@ class GUI(tk.Tk):
                             "Image":                    [],
                             "Embedding":                [],
                             'DFLModel':                 False,
-
                             }
         self.source_faces = []
 
@@ -213,6 +336,7 @@ class GUI(tk.Tk):
 
         # Default Parameters Visibility Configuration
         self.default_params_visibility = {}
+        self.default_params_face_editor_visibility = {}
 
         def load_shortcuts_from_json():
             try:
@@ -326,7 +450,7 @@ class GUI(tk.Tk):
             if current_state:
                 self.layer['InputVideoFrame'].grid(row=0, column=0, sticky='NEWS', padx=0, pady=(0,0))
                 ks_frame.grid_forget()
-                pv_frame.grid_forget()
+                pv_frame_container.grid_forget()
                 self.collapse_keyboardshortcuts.deselect()
                 self.collapse_parametersvisibility.deselect()
             else:
@@ -363,13 +487,13 @@ class GUI(tk.Tk):
                 ks_frame.grid(row=0, column=0, sticky='NEWS', padx=0, pady=(0,0))
                 self.after(10, vidupdate)
                 self.layer['InputVideoFrame'].grid_forget()
-                pv_frame.grid_forget()
+                pv_frame_container.grid_forget()
                 self.after(10, vidupdate)
                 self.checkbox.deselect()
                 self.collapse_parametersvisibility.deselect()
             else:
                 ks_frame.grid_forget()
-                pv_frame.grid_forget()
+                pv_frame_container.grid_forget()
                 v_f_frame.grid_forget()
                 self.after(10, vidupdate)
                 self.layer['InputVideoFrame'].grid(row=0, column=0, sticky='NEWS', padx=0, pady=(0,0))
@@ -380,7 +504,7 @@ class GUI(tk.Tk):
         def parameters_visibility():
             current_state = self.collapse_parametersvisibility.get()
             if current_state:
-                pv_frame.grid(row=0, column=0, sticky='NEWS', padx=0, pady=(0,0))
+                pv_frame_container.grid(row=0, column=0, sticky='NEWS', padx=0, pady=(0,0))
                 self.after(10, vidupdate)
                 self.layer['InputVideoFrame'].grid_forget()
                 ks_frame.grid_forget()
@@ -388,7 +512,7 @@ class GUI(tk.Tk):
                 self.checkbox.deselect()
                 self.collapse_keyboardshortcuts.deselect()
             else:
-                pv_frame.grid_forget()
+                pv_frame_container.grid_forget()
                 ks_frame.grid_forget()
                 v_f_frame.grid_forget()
                 self.after(10, vidupdate)
@@ -414,7 +538,7 @@ class GUI(tk.Tk):
         top_frame.grid_columnconfigure(1, weight=0)
 
         # Middle Frame
-        middle_frame = tk.Frame( self, style.frame_style_bg)
+        middle_frame = tk.Frame(self, style.frame_style_bg)
         middle_frame.grid(row=1, column=0, sticky='NEWS', padx=0, pady=0)
         middle_frame.grid_rowconfigure(0, weight=1)
         # Videos and Faces
@@ -534,10 +658,52 @@ class GUI(tk.Tk):
             ctk.CTkEntry(ks_frame, textvariable=text_vars[shortcut_name], width=50, height=15, border_width=0).place(x=180, y=y)
             y += 20
 
-        global pv_frame
-        pv_frame = GE.CTkScrollableFrame(middle_frame, allow_drag_and_drop=True, allowed_widget_type=GE.ParamSwitch, height = 42, width=250, border_width=0, fg_color=style.main, background_corner_colors=(style.main,style.main,style.main,style.main))
-        pv_frame.grid(row=0, column=0, sticky='NEWS', padx=0, pady=(0,0))
-        pv_frame.grid_forget()
+        # Parameters Visibility Frame Container
+        pv_frame_container = tk.Frame(middle_frame, style.frame_style_bg)
+        pv_frame_container.grid(row=0, column=0, sticky='NEWS', padx=0, pady=0)
+        pv_frame_container.grid_rowconfigure(0, weight=0)
+        pv_frame_container.grid_rowconfigure(1, weight=0)
+        pv_frame_container.grid_rowconfigure(2, weight=1)
+
+        # Create empty row
+        empty_row = ctk.CTkLabel(pv_frame_container, text="", fg_color=style.main2, height=15)
+        empty_row.grid(row=0, column=0, sticky='NS', padx=0, pady=0)
+
+        # Creare CTkTabview all'interno di 'pv_frame_container'
+        tabview_main_visibility = ctk.CTkTabview(pv_frame_container,
+                                      width=350,
+                                      height=100,
+                                      corner_radius=6,
+                                      border_width=1,
+                                      fg_color=style.main,
+                                      border_color=style.main3,
+                                      segmented_button_selected_hover_color='#b1b1b2',
+                                      segmented_button_unselected_hover_color=style.main,
+                                      segmented_button_selected_color='#7562ee',
+                                      segmented_button_unselected_color=style.main,
+                                      text_color='#F1E5AC',
+                                      text_color_disabled=style.main2)
+
+        # Posizionamento del CTkTabview all'interno del frame con il grid
+        tabview_main_visibility.grid(row=2, column=0, sticky='nsew')
+
+        # Aggiungi Tabs al CTkTabview
+        tab_face_swapper_visibility = tabview_main_visibility.add("Face Swapper")
+        tab_face_editor_visibility = tabview_main_visibility.add("Face Editor")
+
+        global pv_frame, pv_frame2
+        pv_frame = GE.CTkScrollableFrame(tab_face_swapper_visibility, allow_drag_and_drop=True, allowed_widget_type=GE.ParamSwitch, border_width=0, fg_color=style.main, background_corner_colors=(style.main,style.main,style.main,style.main))
+        pv_frame.grid(row=0, column=0, sticky='nsew', padx=0, pady=(0, 0))
+
+        # Configura il layout per il CTkScrollableFrame affinché si espanda
+        tab_face_swapper_visibility.grid_rowconfigure(0, weight=1)
+        tab_face_swapper_visibility.grid_columnconfigure(0, weight=1)
+
+        pv_frame2 = GE.CTkScrollableFrame(tab_face_editor_visibility, allow_drag_and_drop=True, allowed_widget_type=GE.ParamSwitch, border_width=0, fg_color=style.main, background_corner_colors=(style.main,style.main,style.main,style.main))
+        pv_frame2.grid(row=0, column=0, sticky='nsew', padx=0, pady=(0, 0))
+
+        tab_face_editor_visibility.grid_rowconfigure(0, weight=1)
+        tab_face_editor_visibility.grid_columnconfigure(0, weight=1)
 
         def load_params_visibility_from_json(task='startup', initial_dir="."):
             try:
@@ -553,23 +719,24 @@ class GUI(tk.Tk):
                 # Verifica il tipo di configurazione
                 if config_data.get("config_type") != "parameters_visibility":
                     print(f"Error: {file_name} has an invalid configuration type!")
-                    return None
+                    return None, None
 
                 # Restituisci i parametri di configurazione
-                return config_data.get("parameters", {})
+                return config_data.get("parameters", {}), config_data.get("parameters_face_editor", {})
 
             except FileNotFoundError:
-                return {}
+                return {}, {}
             except json.JSONDecodeError:
                 print(f"Error decoding JSON file: {file_name}")
-                return None
+                return None, None
 
-        def save_params_visibility_to_json(params_visibility, initial_dir=".", default_filename="startup_parameters_visibility.json"):
+        def save_params_visibility_to_json(params_visibility, params_face_editor_visibility, initial_dir=".", default_filename="startup_parameters_visibility.json"):
             # Aggiungi il tipo di configurazione e la versione
             config_data = {
                 "config_type": "parameters_visibility",
                 "version": "1.0",
-                "parameters": params_visibility
+                "parameters": params_visibility,
+                "parameters_faceeditor": params_face_editor_visibility
             }
 
             save_file = filedialog.asksaveasfile(
@@ -584,91 +751,153 @@ class GUI(tk.Tk):
                     json.dump(config_data, save_file, indent=4)
 
         # get Parameters Visibility from frame
-        def get_params_visibility_from_frame():
+        def get_params_visibility_from_frame(param_type='all'):
             params_visibility = {}
+            params_face_editor_visibility = {}
 
-            max_row = pv_frame.scrollable_frame.grid_size()[1]  # Ottieni il numero massimo di righe
-            for row in range(max_row):
-                widgets_in_row = pv_frame.scrollable_frame.grid_slaves(row=row)
-                for widget in widgets_in_row:
-                    # Controlla se il widget è un frame che contiene un ParamSwitch
-                    if hasattr(widget, 'draggable_object_instance'):
-                        #print(f"ParamSwitch nella riga {row}: {widget.draggable_object_instance.name}, Tipo: {type(widget.draggable_object_instance).__name__}, Valore: { widget.draggable_object_instance.get()}")
-                        params_visibility[widget.draggable_object_instance.name] = widget.draggable_object_instance.get()
+            if param_type == "all" or param_type == "parameters":
+                max_row = pv_frame.scrollable_frame.grid_size()[1]  # Ottieni il numero massimo di righe
+                for row in range(max_row):
+                    widgets_in_row = pv_frame.scrollable_frame.grid_slaves(row=row)
+                    for widget in widgets_in_row:
+                        # Controlla se il widget è un frame che contiene un ParamSwitch
+                        if hasattr(widget, 'draggable_object_instance'):
+                            #print(f"ParamSwitch nella riga {row}: {widget.draggable_object_instance.name}, Tipo: {type(widget.draggable_object_instance).__name__}, Valore: { widget.draggable_object_instance.get()}")
+                            params_visibility[widget.draggable_object_instance.name] = widget.draggable_object_instance.get()
 
-            return params_visibility
+            if param_type == "all" or param_type == "parameters_face_editor":
+                max_row = pv_frame2.scrollable_frame.grid_size()[1]  # Ottieni il numero massimo di righe
+                for row in range(max_row):
+                    widgets_in_row = pv_frame2.scrollable_frame.grid_slaves(row=row)
+                    for widget in widgets_in_row:
+                        # Controlla se il widget è un frame che contiene un ParamSwitch
+                        if hasattr(widget, 'draggable_object_instance'):
+                            #print(f"ParamSwitch nella riga {row}: {widget.draggable_object_instance.name}, Tipo: {type(widget.draggable_object_instance).__name__}, Valore: { widget.draggable_object_instance.get()}")
+                            params_face_editor_visibility[widget.draggable_object_instance.name] = widget.draggable_object_instance.get()
+
+            return params_visibility, params_face_editor_visibility
 
         # Create save parameters visibility function
         def save_params_visibility():
+            params_visibility, params_face_editor_visibility = get_params_visibility_from_frame(param_type='all')
             # Save the current list to JSON
-            save_params_visibility_to_json(get_params_visibility_from_frame())
+            save_params_visibility_to_json(params_visibility, params_face_editor_visibility)
 
-        def remove_param_switch_widgets():
-            # Ottieni il numero massimo di righe nel frame
-            max_row = pv_frame.scrollable_frame.grid_size()[1]
+        def remove_param_switch_widgets(param_type='all'):
+            if param_type == "all" or param_type == "parameters":
+                # Ottieni il numero massimo di righe nel frame
+                max_row = pv_frame.scrollable_frame.grid_size()[1]
 
-            for row in range(max_row):
-                # Ottieni tutti i widget nella riga corrente
-                widgets_in_row = pv_frame.scrollable_frame.grid_slaves(row=row)
-                for widget in widgets_in_row:
-                    # Controlla se il widget ha l'attributo 'draggable_object_instance'
-                    if hasattr(widget, 'draggable_object_instance'):
-                        # Distrugge il widget se ha l'attributo 'draggable_object_instance'
-                        widget.destroy()
+                for row in range(max_row):
+                    # Ottieni tutti i widget nella riga corrente
+                    widgets_in_row = pv_frame.scrollable_frame.grid_slaves(row=row)
+                    for widget in widgets_in_row:
+                        # Controlla se il widget ha l'attributo 'draggable_object_instance'
+                        if hasattr(widget, 'draggable_object_instance'):
+                            # Distrugge il widget se ha l'attributo 'draggable_object_instance'
+                            widget.destroy()
+
+            if param_type == "all" or param_type == "parameters_face_editor":
+                # Ottieni il numero massimo di righe nel frame
+                max_row = pv_frame2.scrollable_frame.grid_size()[1]
+
+                for row in range(max_row):
+                    # Ottieni tutti i widget nella riga corrente
+                    widgets_in_row = pv_frame2.scrollable_frame.grid_slaves(row=row)
+                    for widget in widgets_in_row:
+                        # Controlla se il widget ha l'attributo 'draggable_object_instance'
+                        if hasattr(widget, 'draggable_object_instance'):
+                            # Distrugge il widget se ha l'attributo 'draggable_object_instance'
+                            widget.destroy()
 
         def load_params_visibility_configuration():
-            json_file = load_params_visibility_from_json(task='manual', initial_dir=".")
-            if json_file:
-                remove_param_switch_widgets()
+            json_conf, json_conf2 = load_params_visibility_from_json(task='manual', initial_dir=".")
+            if json_conf:
+                remove_param_switch_widgets(param_type='parameters')
 
                 for widget_name, widget_instance in self.default_params_visibility.items():
-                    if widget_name not in json_file:
-                        json_file[widget_name] = True
+                    if widget_name not in json_conf:
+                        json_conf[widget_name] = True
 
-                apply_params_visibility_configuration(json_file, True)
+                apply_params_visibility_configuration(json_conf, None, param_type='parameters', reload=True)
+
+            if json_conf2:
+                remove_param_switch_widgets(param_type='parameters_face_editor')
+
+                for widget_name, widget_instance in self.default_params_face_editor_visibility.items():
+                    if widget_name not in json_conf2:
+                        json_conf2[widget_name] = True
+
+                apply_params_visibility_configuration(None, json_conf2, param_type='parameters_face_editor', reload=True)
 
         def default_params_visibility_configuration():
-            remove_param_switch_widgets()
-            apply_params_visibility_configuration(self.default_params_visibility, True)
+            remove_param_switch_widgets(param_type='all')
+            apply_params_visibility_configuration(self.default_params_visibility, self.default_params_face_editor_visibility, param_type='all', reload=True)
 
-        def apply_params_visibility_configuration(params_visibility=None, reload=False):
-            if params_visibility == None:
-                params_visibility = get_params_visibility_from_frame()
+        def apply_params_visibility_configuration(params_visibility=None, params_face_editor_visibility=None, param_type='all', reload=False):
+            if param_type == 'all' or param_type == 'parameters':
+                if params_visibility == None:
+                    params_visibility, _ = get_params_visibility_from_frame(param_type='parameters')
 
-            # Apply Parameters Visibility Configuration
-            padx=1
-            pady=0
-            pv_row = 2
-            row = 1
-            column = 0
-            for widget_name, widget_value in params_visibility.items():
-                if widget_name in self.widget:
-                    pv_row += 1
-                    row += 1
+                # Apply Parameters Visibility Configuration
+                padx=1
+                pady=0
+                pv_row = 0
+                row = 1
+                column = 0
+                for widget_name, widget_value in params_visibility.items():
+                    if widget_name in self.widget:
+                        pv_row += 1
+                        row += 1
 
-                    # Create a ParamSwitch in the scrollable frame
-                    if reload:
-                        GE.ParamSwitch(pv_frame.scrollable_frame, widget_name, self.widget[widget_name].display_text, 3, self.update_param_visibility, widget_value, 398, 20, pv_row, 0, padx, pady, allow_drag_and_drop=True)
+                        # Create a ParamSwitch in the scrollable frame
+                        if reload:
+                            GE.ParamSwitch(pv_frame.scrollable_frame, widget_name, self.widget[widget_name].display_text, 3, self.update_param_visibility, widget_value, 398, 20, pv_row, 0, padx, pady, allow_drag_and_drop=True)
 
-                    # Check if the widget has a 'frame' attribute, so can be reordered
-                    if hasattr(self.widget[widget_name], 'frame'):
-                        self.widget[widget_name].frame.grid(row=row, column=column, padx=padx, pady=pady)
+                        # Check if the widget has a 'frame' attribute, so can be reordered
+                        if hasattr(self.widget[widget_name], 'frame'):
+                            self.widget[widget_name].frame.grid(row=row, column=column, padx=padx, pady=pady)
 
-                    # Apply visibility setting
-                    if not widget_value:
-                        self.widget[widget_name].hide()  # Ensure hide method correctly removes or hides the widget
-                    elif widget_value:
-                        self.widget[widget_name].unhide()  # Ensure unhide method correctly add or unhides the widget
+                        # Apply visibility setting
+                        if not widget_value:
+                            self.widget[widget_name].hide()  # Ensure hide method correctly removes or hides the widget
+                        elif widget_value:
+                            self.widget[widget_name].unhide()  # Ensure unhide method correctly add or unhides the widget
+
+            if param_type == 'all' or param_type == 'parameters_face_editor':
+                if params_face_editor_visibility == None:
+                    _, params_face_editor_visibility = get_params_visibility_from_frame(param_type='parameters_face_editor')
+
+                # Apply Parameters Visibility Configuration
+                padx=1
+                pady=0
+                pv_row = 0
+                row = 1
+                column = 0
+                for widget_name, widget_value in params_face_editor_visibility.items():
+                    if widget_name in self.widget:
+                        pv_row += 1
+                        row += 1
+
+                        # Create a ParamSwitch in the scrollable frame
+                        if reload:
+                            GE.ParamSwitch(pv_frame2.scrollable_frame, widget_name, self.widget[widget_name].display_text, 3, self.update_param_visibility, widget_value, 398, 20, pv_row, 0, padx, pady, allow_drag_and_drop=True)
+
+                        # Check if the widget has a 'frame' attribute, so can be reordered
+                        if hasattr(self.widget[widget_name], 'frame'):
+                            self.widget[widget_name].frame.grid(row=row, column=column, padx=padx, pady=pady)
+
+                        # Apply visibility setting
+                        if not widget_value:
+                            self.widget[widget_name].hide()  # Ensure hide method correctly removes or hides the widget
+                        elif widget_value:
+                            self.widget[widget_name].unhide()  # Ensure unhide method correctly add or unhides the widget
 
             # resize parameters scrollbar
             self.static_widget['parameters_scrollbar'].resize_scrollbar(None)
 
-        # Create empty row
-        empty_row = ctk.CTkLabel(pv_frame.scrollable_frame, text="", fg_color=style.main2, height=15)
-        empty_row.grid(row=0, column=0, sticky='NS', padx=0, pady=0)
-
         # Crea una nuova Frame per contenere i pulsanti
-        button_frame = ctk.CTkFrame(pv_frame.scrollable_frame, fg_color=style.main)
+        button_frame = tk.Frame(pv_frame_container, style.frame_style_bg)
         button_frame.grid(row=1, column=0, sticky='EW', padx=0, pady=0)
 
         # Configura le colonne del button_frame
@@ -678,21 +907,19 @@ class GUI(tk.Tk):
         button_frame.grid_columnconfigure(3, weight=1)
 
         # Crea e posiziona i pulsanti all'interno della button_frame
-        save_pv_button = ctk.CTkButton(button_frame, text="Save", command=save_params_visibility, width=80, height=15, corner_radius=3, fg_color=style.main2, hover_color=style.main3, text_color="#FFFFE0", anchor='center')
+        save_pv_button = ctk.CTkButton(button_frame, text="Save", command=save_params_visibility, width=80, height=15, corner_radius=3, fg_color=style.main, hover_color=style.main3, text_color="#FFFFE0", anchor='center')
         save_pv_button.grid(row=0, column=0, padx=0, pady=0)
 
-        apply_pv_button = ctk.CTkButton(button_frame, text="Apply", command=lambda: apply_params_visibility_configuration(params_visibility=None, reload=False), width=80, height=15, corner_radius=3, fg_color=style.main2, hover_color=style.main3, text_color="#FFFFE0", anchor='center')
+        apply_pv_button = ctk.CTkButton(button_frame, text="Apply", command=lambda: apply_params_visibility_configuration(params_visibility=None, params_face_editor_visibility=None, param_type='all', reload=False), width=80, height=15, corner_radius=3, fg_color=style.main, hover_color=style.main3, text_color="#FFFFE0", anchor='center')
         apply_pv_button.grid(row=0, column=1, padx=0, pady=0)
 
-        load_pv_button = ctk.CTkButton(button_frame, text="Load", command=load_params_visibility_configuration, width=80, height=15, corner_radius=3, fg_color=style.main2, hover_color=style.main3, text_color="#FFFFE0", anchor='center')
+        load_pv_button = ctk.CTkButton(button_frame, text="Load", command=load_params_visibility_configuration, width=80, height=15, corner_radius=3, fg_color=style.main, hover_color=style.main3, text_color="#FFFFE0", anchor='center')
         load_pv_button.grid(row=0, column=2, padx=0, pady=0)
 
-        default_pv_button = ctk.CTkButton(button_frame, text="Default", command=default_params_visibility_configuration, width=80, height=15, corner_radius=3, fg_color=style.main2, hover_color=style.main3, text_color="#FFFFE0", anchor='center')
+        default_pv_button = ctk.CTkButton(button_frame, text="Default", command=default_params_visibility_configuration, width=80, height=15, corner_radius=3, fg_color=style.main, hover_color=style.main3, text_color="#FFFFE0", anchor='center')
         default_pv_button.grid(row=0, column=3, padx=0, pady=0)
 
-        # Create empty row
-        empty_row2 = ctk.CTkLabel(pv_frame.scrollable_frame, text="", fg_color=style.main2, height=15)
-        empty_row2.grid(row=2, column=0, sticky='NS', padx=0, pady=0)
+        pv_frame_container.grid_forget()
         #endregion
 
         # Bottom Frame
@@ -859,7 +1086,7 @@ class GUI(tk.Tk):
         # Slider
         self.layer['slider_frame'] = tk.Frame(self.layer['preview_column'], style.canvas_frame_label_2, height=50)
         self.layer['slider_frame'].grid(row=2, column=0, sticky='NEWS', pady=0)
-        self.video_slider = GE.Timeline(self.layer['slider_frame'], self.widget, self.temp_toggle_swapper, self.temp_toggle_enhancer, self.add_action)
+        self.video_slider = GE.Timeline(self.layer['slider_frame'], self.widget, self.temp_toggle_swapper, self.temp_toggle_enhancer, self.temp_toggle_faces_editor, self.add_action)
 
         # Markers
         self.layer['markers_canvas'] = tk.Canvas(self.layer['preview_column'], style.canvas_frame_label_2, height = 20)
@@ -935,13 +1162,14 @@ class GUI(tk.Tk):
         ff_frame.grid_rowconfigure(0, weight=0)
 
         # Buttons
-        button_frame = tk.Frame(ff_frame, style.canvas_frame_label_2, height = 133, width = 112)
+        button_frame = tk.Frame(ff_frame, style.canvas_frame_label_2, height = 166, width = 112)
         button_frame.grid( row = 0, column = 0, )
 
         self.widget['FindFacesButton'] = GE.Button(button_frame, 'FindFaces', 2, self.find_faces, None, 'control', x=0, y=0, width=112, height=33)
         self.widget['ClearFacesButton'] = GE.Button(button_frame, 'ClearFaces', 2, self.clear_faces, None, 'control', x=0, y=33, width=112, height=33)
         self.widget['SwapFacesButton'] = GE.Button(button_frame, 'SwapFaces', 2, self.toggle_swapper, None, 'control', x=0, y=66, width=112, height=33)
-        self.widget['EnhanceFrameButton'] = GE.Button(button_frame, 'EnhanceFrame', 2, self.toggle_enhancer, None, 'control', x=0, y=99, width=112, height=33)
+        self.widget['EditFacesButton'] = GE.Button(button_frame, 'EditFaces', 2, self.toggle_faces_editor, None, 'control', x=0, y=99, width=112, height=33)
+        self.widget['EnhanceFrameButton'] = GE.Button(button_frame, 'EnhanceFrame', 2, self.toggle_enhancer, None, 'control', x=0, y=132, width=112, height=33)
 
         # Scroll Canvas
         self.found_faces_canvas = tk.Canvas(ff_frame, style.canvas_frame_label_3, height = 100 )
@@ -1013,10 +1241,30 @@ class GUI(tk.Tk):
         self.layer['parameters_canvas'] = tk.Canvas(self.layer['parameter_frame'], style.canvas_frame_label_3, bd=0, width=width)
         self.layer['parameters_canvas'].grid(row=1, column=0, sticky='NEWS', pady=0, padx=0)
 
-        self.layer['parameters_frame'] = tk.Frame(self.layer['parameters_canvas'], style.canvas_frame_label_3, bd=0, width=width, height=2050)
+        # Face Editor
+        tabview_main = ctk.CTkTabview(self.layer['parameters_canvas'], width=398, height=2050, corner_radius=6, border_width=1,
+                                      fg_color=style.main, border_color=style.main3,
+                                      segmented_button_selected_hover_color='#b1b1b2',
+                                      segmented_button_unselected_hover_color=style.main,
+                                      segmented_button_selected_color='#7562ee',
+                                      segmented_button_unselected_color=style.main,
+                                      text_color='#F1E5AC',
+                                      text_color_disabled=style.main2)
+
+        tabview_main.pack(fill='both', expand=True)  # Utilizza pack per gestire il layout all'interno del Canvas
+
+        # Inserisci il CTkTabview nel Canvas usando create_window
+        self.layer['parameters_canvas'].create_window(0, 0, window=tabview_main, anchor='nw')
+
+        # Aggiungi Tabs al CTkTabview
+        tab_face_swapper = tabview_main.add("Face Swapper  ")
+        tab_live_portrait = tabview_main.add("Face Editor  ")
+
+        self.layer['parameters_frame'] = tk.Frame(tab_face_swapper, style.canvas_frame_label_3, bd=0, width=width, height=2050)
         self.layer['parameters_frame'].grid(row=0, column=0, sticky='NEWS', pady=0, padx=0)
 
-        self.layer['parameters_canvas'].create_window(0, 0, window = self.layer['parameters_frame'], anchor='nw')
+        self.layer['parameters_face_editor_frame'] = tk.Frame(tab_live_portrait, style.canvas_frame_label_3, bd=0, width=width, height=2050)
+        self.layer['parameters_face_editor_frame'].grid(row=0, column=0, sticky='NEWS', pady=0, padx=0)
 
         self.layer['parameter_scroll_canvas'] = tk.Canvas(self.layer['parameter_frame'], style.canvas_frame_label_3, bd=0, )
         self.layer['parameter_scroll_canvas'].grid(row=1, column=1, sticky='NEWS', pady=0)
@@ -1136,6 +1384,7 @@ class GUI(tk.Tk):
         # DFL AMP Morph Factor
         row = row + 1
         self.widget['DFLAmpMorphSlider'] = GE.Slider2(self.layer['parameters_frame'], 'DFLAmpMorphSlider', 'DFL AMP Morph Factor', 3, self.update_data, 'parameter', 398, 20, row, 0, padx, pady+5, 0.62)
+
         # CLIP
         row = row + 1
         self.widget['CLIPSwitch'] = GE.Switch2(self.layer['parameters_frame'], 'CLIPSwitch', 'Text-Based Masking', 3, self.update_data, 'parameter', 398, 20, row, 0, padx, pady)
@@ -1277,7 +1526,7 @@ class GUI(tk.Tk):
 
         # Face Landmarks Position
         row = row + 1
-        self.widget['LandmarksPositionAdjSwitch'] = GE.Switch2(self.layer['parameters_frame'], 'LandmarksPositionAdjSwitch', 'Landmarks Position Adjustments', 3, self.update_data, 'parameter', 398, 20, row, 0, padx, pady)
+        self.widget['LandmarksPositionAdjSwitch'] = GE.Switch2(self.layer['parameters_frame'], 'LandmarksPositionAdjSwitch', '5 Landmarks Position Adjustments', 3, self.update_data, 'parameter', 398, 20, row, 0, padx, pady)
         row = row + 1
         self.widget['FaceIDSlider'] = GE.Slider2(self.layer['parameters_frame'], 'FaceIDSlider', 'Face ID: ', 3, self.update_face_landmarks_data, 'parameter', 300, 20, row, 0, padx, pady, 0.62)
         row = row + 1
@@ -1310,8 +1559,56 @@ class GUI(tk.Tk):
         row = row + 1
         self.widget['MergeTextSel'] = GE.TextSelection(self.layer['parameters_frame'], 'MergeTextSel', 'Merge Math', 3, self.select_input_faces, 'merge', '', 398, 20, row, 0, padx, pady, 0.62)
 
+        ### Face Editor ###
+        row = 1
+        column = 0
+        padx=1
+        pady=0
+
+        # Providers Priority
+        row = row + 1
+        self.widget['FaceEditorTypeTextSel'] = GE.TextSelection(self.layer['parameters_face_editor_frame'], 'FaceEditorTypeTextSel', 'Face Editor Type', 3, self.update_face_editor_data, 'parameter_face_editor', 'parameter_face_editor', 398, 20, row, 0, padx, pady, 0.60)
+        row = row + 1
+        self.widget['FaceEditorIDSlider'] = GE.Slider2(self.layer['parameters_face_editor_frame'], 'FaceEditorIDSlider', 'Face Editor ID: ', 3, self.update_face_editor_data, 'parameter_face_editor', 398, 20, row, 0, padx, pady, 0.60)
+        row = row + 1
+        self.widget['CropScaleSlider'] = GE.Slider2(self.layer['parameters_face_editor_frame'], 'CropScaleSlider', 'Crop Scale: ', 3, self.update_face_editor_data, 'parameter_face_editor', 398, 20, row, 0, padx, pady, 0.60, 40)
+        row = row + 1
+        self.widget['EyesOpenRatioSlider'] = GE.Slider2(self.layer['parameters_face_editor_frame'], 'EyesOpenRatioSlider', 'Eyes Close <--> Open Ratio: ', 3, self.update_face_editor_data, 'parameter_face_editor', 398, 20, row, 0, padx, pady, 0.60, 40)
+        row = row + 1
+        self.widget['LipsOpenRatioSlider'] = GE.Slider2(self.layer['parameters_face_editor_frame'], 'LipsOpenRatioSlider', 'Lips Close <--> Open Ratio: ', 3, self.update_face_editor_data, 'parameter_face_editor', 398, 20, row, 0, padx, pady, 0.60, 40)
+        row = row + 1
+        self.widget['HeadPitchSlider'] = GE.Slider2(self.layer['parameters_face_editor_frame'], 'HeadPitchSlider', 'Head Pitch: ', 3, self.update_face_editor_data, 'parameter_face_editor', 398, 20, row, 0, padx, pady, 0.60, 40)
+        row = row + 1
+        self.widget['HeadYawSlider'] = GE.Slider2(self.layer['parameters_face_editor_frame'], 'HeadYawSlider', 'Head Yaw: ', 3, self.update_face_editor_data, 'parameter_face_editor', 398, 20, row, 0, padx, pady, 0.60, 40)
+        row = row + 1
+        self.widget['HeadRollSlider'] = GE.Slider2(self.layer['parameters_face_editor_frame'], 'HeadRollSlider', 'Head Roll: ', 3, self.update_face_editor_data, 'parameter_face_editor', 398, 20, row, 0, padx, pady, 0.60, 40)
+        row = row + 1
+        self.widget['XAxisMovementSlider'] = GE.Slider2(self.layer['parameters_face_editor_frame'], 'XAxisMovementSlider', 'X-Axis Movement: ', 3, self.update_face_editor_data, 'parameter_face_editor', 398, 20, row, 0, padx, pady, 0.60, 40)
+        row = row + 1
+        self.widget['YAxisMovementSlider'] = GE.Slider2(self.layer['parameters_face_editor_frame'], 'YAxisMovementSlider', 'Y-Axis Movement: ', 3, self.update_face_editor_data, 'parameter_face_editor', 398, 20, row, 0, padx, pady, 0.60, 40)
+        row = row + 1
+        self.widget['ZAxisMovementSlider'] = GE.Slider2(self.layer['parameters_face_editor_frame'], 'ZAxisMovementSlider', 'Z-Axis Movement: ', 3, self.update_face_editor_data, 'parameter_face_editor', 398, 20, row, 0, padx, pady, 0.60, 40)
+        row = row + 1
+        self.widget['MouthPoutingSlider'] = GE.Slider2(self.layer['parameters_face_editor_frame'], 'MouthPoutingSlider', 'Mouth Pouting: ', 3, self.update_face_editor_data, 'parameter_face_editor', 398, 20, row, 0, padx, pady, 0.60, 40)
+        row = row + 1
+        self.widget['MouthPursingSlider'] = GE.Slider2(self.layer['parameters_face_editor_frame'], 'MouthPursingSlider', 'Mouth Pursing: ', 3, self.update_face_editor_data, 'parameter_face_editor', 398, 20, row, 0, padx, pady, 0.60, 40)
+        row = row + 1
+        self.widget['MouthGrinSlider'] = GE.Slider2(self.layer['parameters_face_editor_frame'], 'MouthGrinSlider', 'Mouth Grin: ', 3, self.update_face_editor_data, 'parameter_face_editor', 398, 20, row, 0, padx, pady, 0.60, 40)
+        row = row + 1
+        self.widget['LipsCloseOpenSlider'] = GE.Slider2(self.layer['parameters_face_editor_frame'], 'LipsCloseOpenSlider', 'Lips Close <--> Open Value: ', 3, self.update_face_editor_data, 'parameter_face_editor', 398, 20, row, 0, padx, pady, 0.60, 40)
+        row = row + 1
+        self.widget['MouthSmileSlider'] = GE.Slider2(self.layer['parameters_face_editor_frame'], 'MouthSmileSlider', 'Mouth Smile: ', 3, self.update_face_editor_data, 'parameter_face_editor', 398, 20, row, 0, padx, pady, 0.60, 40)
+        row = row + 1
+        self.widget['EyeWinkSlider'] = GE.Slider2(self.layer['parameters_face_editor_frame'], 'EyeWinkSlider', 'Eye Wink: ', 3, self.update_face_editor_data, 'parameter_face_editor', 398, 20, row, 0, padx, pady, 0.60, 40)
+        row = row + 1
+        self.widget['EyeBrowsDirectionSlider'] = GE.Slider2(self.layer['parameters_face_editor_frame'], 'EyeBrowsDirectionSlider', 'EyeBrows Direction : ', 3, self.update_face_editor_data, 'parameter_face_editor', 398, 20, row, 0, padx, pady, 0.60, 40)
+        row = row + 1
+        self.widget['EyeGazeHorizontalSlider'] = GE.Slider2(self.layer['parameters_face_editor_frame'], 'EyeGazeHorizontalSlider', 'EyeGaze Horizontal: ', 3, self.update_face_editor_data, 'parameter_face_editor', 398, 20, row, 0, padx, pady, 0.60, 40)
+        row = row + 1
+        self.widget['EyeGazeVerticalSlider'] = GE.Slider2(self.layer['parameters_face_editor_frame'], 'EyeGazeVerticalSlider', 'EyeGaze Vertical: ', 3, self.update_face_editor_data, 'parameter_face_editor', 398, 20, row, 0, padx, pady, 0.60, 40)
+
         # Load saved Parameters Visibility Configuration from Json file
-        params_visibility = load_params_visibility_from_json()
+        params_visibility, params_face_editor_visibility = load_params_visibility_from_json()
         if params_visibility == None:
             params_visibility = {}
 
@@ -1322,8 +1619,18 @@ class GUI(tk.Tk):
                 if widget_name not in params_visibility:
                     params_visibility[widget_name] = True
 
+        if params_face_editor_visibility == None:
+            params_face_editor_visibility = {}
+
+        # Check for all widgets not in saved Parameters Visibility Configuration and add them if missing
+        for widget_name, widget_instance in self.widget.items():
+            if widget_instance.parent == self.layer['parameters_face_editor_frame']:
+                self.default_params_face_editor_visibility[widget_name] = True
+                if widget_name not in params_face_editor_visibility:
+                    params_face_editor_visibility[widget_name] = True
+
         # Apply Parameters Visibility Configuration
-        apply_params_visibility_configuration(params_visibility, True)
+        apply_params_visibility_configuration(params_visibility, params_face_editor_visibility, param_type='all', reload=True)
 
     ### Other
         self.layer['tooltip_frame'] = tk.Frame(self.layer['parameter_frame'], style.canvas_frame_label_3, height=80)
@@ -1353,20 +1660,23 @@ class GUI(tk.Tk):
 
         self.status_left_label = tk.Label(bottom_frame, style.donate_1, cursor="hand2", text=" Questions/Help/Discussions (Discord)")
         self.status_left_label.grid( row = 0, column = 0, sticky='NEWS')
-        self.status_left_label.bind("<Button-1>", lambda e: self.callback("https://discord.gg/EcdVAFJzqp"))
+        self.status_left_label.bind("<Button-1>", lambda e: self.callback("https://discord.gg/dzvpCUet"))
 
-        self.status_label = tk.Label(bottom_frame, style.donate_1, text="Rope Github")
+        self.status_label = tk.Label(bottom_frame, style.donate_1, text="Rope Next Github")
         self.status_label.grid( row = 0, column = 1, sticky='NEWS')
-        self.status_label.bind("<Button-1>", lambda e: self.callback("https://github.com/Hillobar/Rope"))
+        self.status_label.bind("<Button-1>", lambda e: self.callback("https://github.com/Alucard24/Rope"))
 
         self.donate_label = tk.Label(bottom_frame, style.donate_1, text="Enjoy Rope? Please Support! (Paypal) ", anchor='e')
         self.donate_label.grid( row = 0, column = 2, sticky='NEWS')
-        self.donate_label.bind("<Button-1>", lambda e: self.callback("https://www.paypal.com/donate/?hosted_button_id=Y5SB9LSXFGRF2"))
+        self.donate_label.bind("<Button-1>", lambda e: self.callback("https://www.paypal.com/donate/?business=XJX2E5ZTMZUSQ&no_recurring=0&item_name=Support+us+with+a+donation%21+Your+contribution+helps+us+continue+improving+and+providing+quality+content.+Thank+you%21&currency_code=EUR"))
 
         # Face Landmarks
         self.face_landmarks = FaceLandmarks(self.widget, self.parameters, self.add_action)
         self.add_action("face_landmarks", self.face_landmarks)
-        #
+
+        # Face Editor
+        self.face_editor = FaceEditor(self.widget, self.parameters_face_editor, self.add_action)
+        self.add_action("face_editor", self.face_editor)
 
     # Face Landmarks
     def update_face_landmarks_data(self, mode, name, use_markers=False):
@@ -1405,13 +1715,36 @@ class GUI(tk.Tk):
 
             self.add_action("face_landmarks", self.face_landmarks)
 
-            self.face_landmarks.apply_landmarks_to_widget_and_parameters(frame_number, face_id)
+            self.face_landmarks.apply_changes_to_widget_and_parameters(frame_number, face_id)
 
             if use_markers:
                 self.add_action('get_requested_video_frame', frame_number)
             else:
                 self.add_action('get_requested_video_frame_without_markers', frame_number)
-    #
+
+    # Face Editor
+    def update_face_editor_data(self, mode, name, use_markers=False):
+        if mode == 'parameter_face_editor':
+            frame_number = self.video_slider.get()
+            face_id = self.widget['FaceEditorIDSlider'].get()
+            parameter_value = self.widget[name].get()
+
+            parameters = self.face_editor.get_parameters(frame_number, face_id)
+            if parameters is None:
+                parameters = ['Human-Face', 2.50, 0.00, 0.00, 0, 0, 0, 0.00, 0.00, 1.00, 0.00, 0.00, 0.00, 0, 0.00, 0.00, 0.00, 0.00, 0.00]
+                self.face_editor.add_parameters(frame_number, face_id, parameters)
+
+            if name in self.face_editor.parameter_map:
+                index = self.face_editor.parameter_map[name]
+                parameters[index] = parameter_value
+
+            self.add_action("face_editor", self.face_editor)
+            self.face_editor.apply_changes_to_widget_and_parameters(frame_number, face_id)
+
+            if use_markers:
+                self.add_action('get_requested_video_frame', frame_number)
+            else:
+                self.add_action('get_requested_video_frame_without_markers', frame_number)
 
     # Update the parameters or controls dicts and get a new frame
     def update_data(self, mode, name, use_markers=False):
@@ -1431,15 +1764,25 @@ class GUI(tk.Tk):
                     # reload input faces
                     self.load_input_faces()
             elif name == "ProvidersPriorityTextSel":
-                self.models.switch_providers_priority(self.parameters[name])
-                self.models.delete_models()
-                torch.cuda.empty_cache()
+                provider_value = self.models.switch_providers_priority(self.parameters[name])
+                if provider_value != self.parameters[name]:
+                    self.parameters[name] = provider_value
+                    self.widget[name].set(provider_value, request_frame=False)
+                else:
+                    self.models.delete_models()
+                    torch.cuda.empty_cache()
 
             elif name=='WebCamMaxResolSel' or name=='WebCamMaxFPSSel':
                 # self.add_action(load_target_video()
                 self.add_action('change_webcam_resolution_and_fps')
 
-            #
+            # Face Editor
+            '''
+            elif mode=='parameter_face_editor':
+                self.parameters_face_editor[name] = self.widget[name].get()
+                self.add_action('parameters_face_editor', self.parameters_face_editor)
+            '''
+
         elif mode=='control':
             self.control[name] =  self.widget[name].get()
             self.add_action('control', self.control)
@@ -1628,7 +1971,7 @@ class GUI(tk.Tk):
         # Build UI, update ui with default data
         self.create_gui()
 
-        self.video_image = cv2.cvtColor(cv2.imread('./rope/media/splash.png'), cv2.COLOR_BGR2RGB)
+        self.video_image = cv2.cvtColor(cv2.imread('./rope/media/splash_next.png'), cv2.COLOR_BGR2RGB)
         self.resize_image()
 
         # Create parameters and controls and and selctively fill with UI data
@@ -1639,6 +1982,11 @@ class GUI(tk.Tk):
 
             elif self.widget[key].get_data_type()=='control':
                 self.control[key] =  self.widget[key].get()
+
+        # Create parameters_face_editor and selctively fill with UI data
+        for key, value in self.widget.items():
+            if self.widget[key].get_data_type()=='parameter_face_editor':
+                self.parameters_face_editor[key] = self.widget[key].get()
 
         try:
             self.json_dict["source videos"] = json_object["source videos"]
@@ -1693,12 +2041,28 @@ class GUI(tk.Tk):
                         if key in self.parameters:
                             self.parameters[key] = temp[key]
                             if key == "ProvidersPriorityTextSel":
-                                self.models.switch_providers_priority(temp[key])
+                                provider_value = self.models.switch_providers_priority(temp[key])
+                                if provider_value != temp[key]:
+                                    self.parameters[key] = provider_value
                     except KeyError:
                         pass
 
                   # Update the UI
                 for key, value in self.parameters.items():
+                    self.widget[key].set(value, request_frame=False)
+
+                # Carica i parametri face editor
+                temp = temp.get("parameters_face_editor", {})
+                for key, value in self.parameters_face_editor.items():
+                    try:
+                        # Do not load parameter that doesn't exist in widgets
+                        if key in self.parameters_face_editor:
+                            self.parameters_face_editor[key] = temp[key]
+                    except KeyError:
+                        pass
+
+                # Update the UI face editor
+                for key, value in self.parameters_face_editor.items():
                     self.widget[key].set(value, request_frame=False)
             else:
                 print("Error: startup_parameters.json has an invalid configuration type!")
@@ -1772,7 +2136,6 @@ class GUI(tk.Tk):
         self.widget['FacesFolderButton'].set(False, request_frame=False)
         self.load_input_faces()
 
-
     def load_dfl_input_models(self):
         text_font = font.Font(family="Helvetica", size=10)
         dfl_models_dir = 'dfl_models'
@@ -1813,11 +2176,11 @@ class GUI(tk.Tk):
             adjacent_elem_index = cur_index - 4
             x_width = self.source_faces[adjacent_elem_index].get('XCoord',0) + self.source_faces[adjacent_elem_index].get('TextWidth',0)
         return x_width
+
     def load_input_faces(self):
         self.source_faces = []
         self.merged_faces_canvas.delete("all")
         self.source_faces_canvas.delete("all")
-
 
         text_font = font.Font(family="Helvetica", size=10)
 
@@ -1905,12 +2268,12 @@ class GUI(tk.Tk):
                                 rotation_angles = [0, 90, 180, 270]
                             else:
                                 rotation_angles = [0]
-                            bboxes, kpss = self.models.run_detect(img, detect_mode=self.parameters["DetectTypeTextSel"], max_num=1, score=0.5, use_landmark_detection=self.parameters['LandmarksDetectionAdjSwitch'], landmark_detect_mode=self.parameters["LandmarksDetectTypeTextSel"], landmark_score=0.5, from_points=self.parameters["LandmarksAlignModeFromPointsSwitch"], rotation_angles=rotation_angles) # Just one face here
-                            kpss = kpss[0]
+                            bboxes, kpss_5, _ = self.models.run_detect(img, detect_mode=self.parameters["DetectTypeTextSel"], max_num=1, score=0.5, use_landmark_detection=self.parameters['LandmarksDetectionAdjSwitch'], landmark_detect_mode=self.parameters["LandmarksDetectTypeTextSel"], landmark_score=0.5, from_points=self.parameters["LandmarksAlignModeFromPointsSwitch"], rotation_angles=rotation_angles) # Just one face here
+                            kpss_5 = kpss_5[0]
                         except IndexError:
                             print('Image cropped too close:', file)
                         else:
-                            face_emb, cropped_image = self.models.run_recognize(img, kpss, self.parameters["SimilarityTypeTextSel"], self.parameters['FaceSwapperModelTextSel'])
+                            face_emb, cropped_image = self.models.run_recognize(img, kpss_5, self.parameters["SimilarityTypeTextSel"], self.parameters['FaceSwapperModelTextSel'])
                             crop = cv2.cvtColor(cropped_image.cpu().numpy(), cv2.COLOR_BGR2RGB)
                             crop = cv2.resize(crop, (85, 85))
 
@@ -1944,14 +2307,10 @@ class GUI(tk.Tk):
                 rotation_angles = [0, 90, 180, 270]
             else:
                 rotation_angles = [0]
-            bboxes, kpss = self.models.run_detect(img, detect_mode=self.parameters["DetectTypeTextSel"], max_num=50, score=self.parameters["DetectScoreSlider"]/100.0, use_landmark_detection=self.parameters['LandmarksDetectionAdjSwitch'], landmark_detect_mode=self.parameters["LandmarksDetectTypeTextSel"], landmark_score=self.parameters["LandmarksDetectScoreSlider"]/100.0, from_points=self.parameters["LandmarksAlignModeFromPointsSwitch"], rotation_angles=rotation_angles)
+            bboxes, kpss_5, _ = self.models.run_detect(img, detect_mode=self.parameters["DetectTypeTextSel"], max_num=50, score=self.parameters["DetectScoreSlider"]/100.0, use_landmark_detection=self.parameters['LandmarksDetectionAdjSwitch'], landmark_detect_mode=self.parameters["LandmarksDetectTypeTextSel"], landmark_score=self.parameters["LandmarksDetectScoreSlider"]/100.0, from_points=self.parameters["LandmarksAlignModeFromPointsSwitch"], rotation_angles=rotation_angles)
 
             ret = []
-            for face_kps in kpss:
-
-                # if kpss is not None:
-                #     face_kps = kpss[i]
-
+            for face_kps in kpss_5:
                 face_emb, cropped_img = self.models.run_recognize(img, face_kps, self.parameters["SimilarityTypeTextSel"], self.parameters['FaceSwapperModelTextSel'])
                 ret.append([face_kps, face_emb, cropped_img])
 
@@ -2106,6 +2465,7 @@ class GUI(tk.Tk):
                 # Clear all of the assignments
                 tface["SourceFaceAssignments"] = []
                 tface['DFLModel'] = False
+
                 # Iterate through all Input faces
                 temp_holder = []
                 for j in range(len(self.source_faces)):
@@ -2118,8 +2478,14 @@ class GUI(tk.Tk):
                             temp_holder.append(self.source_faces[j]['Embedding'])
 
                         if self.source_faces[j]['DFLModel']:
-
+                            # Clear DFL models from memory
+                            if self.models.dfl_models and self.parameters['DFLLoadOnlyOneSwitch']:
+                                for model in list(self.models.dfl_models):
+                                    del self.models.dfl_models[model]._sess
+                                    del self.models.dfl_models[model]
+                                gc.collect()
                             tface['DFLModel'] = self.source_faces[j]['DFLModel']
+
                 # do averaging
                 if temp_holder:
                     if self.widget['MergeTextSel'].get() == 'Median':
@@ -2259,16 +2625,17 @@ class GUI(tk.Tk):
 
     def auto_swap(self):
             # Reselect Target Image
-            # try:
-            self.find_faces()
-            self.target_faces[0]["ButtonState"] = True
-            self.target_faces[0]["TKButton"].config(style.media_button_on_3)
+            try:
+                self.find_faces()
+                self.target_faces[0]["ButtonState"] = True
+                self.target_faces[0]["TKButton"].config(style.media_button_on_3)
 
-            # Reselect Source images
-            self.select_input_faces('auto', '')
-            self.toggle_swapper(True)
-            # except:
-            #     pass
+                # Reselect Source images
+                self.select_input_faces('auto', '')
+                self.toggle_swapper(True)
+            except:
+                pass
+
     def toggle_auto_swap(self):
         self.widget['AutoSwapButton'].toggle_button()
 
@@ -2516,6 +2883,31 @@ class GUI(tk.Tk):
             self.widget['EnhanceFrameButton'].temp_enable_button()
 
         self.update_data('control', 'EnhanceFrameButton', use_markers=True)
+
+    def toggle_faces_editor(self, toggle_value=-1):
+        if toggle_value == -1:
+            self.widget['EditFacesButton'].toggle_button()
+
+        else:
+            if toggle_value:
+                self.widget['EditFacesButton'].enable_button()
+            else:
+                self.widget['EditFacesButton'].disable_button()
+
+        if self.widget['PreviewModeTextSel'].get()=='Video' or self.widget['PreviewModeTextSel'].get()=='Theater':
+            self.update_data('control', 'EditFacesButton', use_markers=True)
+        elif self.widget['PreviewModeTextSel'].get()=='Image':
+            self.update_data('control', 'EditFacesButton', use_markers=False)
+        elif self.widget['PreviewModeTextSel'].get() == 'FaceLab':
+            self.update_data('control', 'EditFacesButton', use_markers=False)
+
+    def temp_toggle_faces_editor(self, state):
+        if state=='off':
+            self.widget['EditFacesButton'].temp_disable_button()
+        elif state=='on':
+            self.widget['EditFacesButton'].temp_enable_button()
+
+        self.update_data('control', 'EditFacesButton', use_markers=True)
 
     def toggle_rec_video(self):
         # Play button must be off to enable record button
@@ -2901,6 +3293,7 @@ class GUI(tk.Tk):
         self.widget['CLIPSwitch'].set(False)
         self.toggle_swapper(False)
         self.toggle_enhancer(False)
+        self.toggle_faces_editor(False)
 
         self.models.delete_models()
         torch.cuda.empty_cache()
@@ -2951,7 +3344,8 @@ class GUI(tk.Tk):
                 config_data = {
                     "config_type": "parameters",
                     "version": "1.0",
-                    "parameters": self.parameters
+                    "parameters": self.parameters,
+                    "parameters_face_editor": self.parameters_face_editor,
                 }
                 json.dump(config_data, save_file, indent=4)
                 save_file.close()
@@ -2975,11 +3369,18 @@ class GUI(tk.Tk):
                         if key in self.parameters:
                             self.parameters[key] = value
 
+                    # Load parameters face editor from json file and assign them only if exist
+                    temp = config_data.get("parameters_face_editor", {})
+                    for key, value in temp.items():
+                        if key in self.parameters_face_editor:
+                            self.parameters_face_editor[key] = value
+
                     # Update the UI
                     self.update_ui_with_parameters()
 
                     # Log the actions
                     self.add_action('parameters', self.parameters)
+                    self.add_action('parameters_face_editor', self.parameters_face_editor)
                     self.add_action('control', self.control)
                     self.add_action('get_requested_video_frame', self.video_slider.get())
 
@@ -2994,6 +3395,7 @@ class GUI(tk.Tk):
 
             # Log the actions
             self.add_action('parameters', self.parameters)
+            self.add_action('parameters_face_editor', self.parameters_face_editor)
             self.add_action('control', self.control)
             self.add_action('get_requested_video_frame', self.video_slider.get())
 
@@ -3001,12 +3403,21 @@ class GUI(tk.Tk):
         for key, value in self.parameters.items():
             self.widget[key].set(value, request_frame=False)
             if key == "ProvidersPriorityTextSel":
-                self.models.switch_providers_priority(value)
-                self.models.delete_models()
-                torch.cuda.empty_cache()
+                provider_value = self.models.switch_providers_priority(value)
+                if provider_value != value:
+                    self.widget[key].set(provider_value, request_frame=False)
+                else:
+                    self.models.delete_models()
+                    torch.cuda.empty_cache()
+
+        for key, value in self.parameters_face_editor.items():
+            self.widget[key].set(value, request_frame=False)
 
     def load_default_parameters(self):
         for key, value in self.parameters.items():
+            self.widget[key].load_default()
+
+        for key, value in self.parameters_face_editor.items():
             self.widget[key].load_default()
 
     def findCosineDistance2(self, vector1, vector2):

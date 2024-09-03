@@ -7,9 +7,9 @@ tk==0.1.0
 pillow==9.5.0
 onnx==1.16.1
 protobuf==4.23.2
-torch --index-url https://download.pytorch.org/whl/cu124
-torchvision --index-url https://download.pytorch.org/whl/cu124
-torchaudio --index-url https://download.pytorch.org/whl/cu124
+torch==2.4.0+cu124
+torchvision==0.19.0+cu124
+torchaudio==2.4.0+cu124
 tqdm
 ftfy
 regex
@@ -17,3 +17,6 @@ customtkinter
 pyvirtualcam==0.11.1
 psutil==6.0.0
 onnxruntime-gpu==1.19.0
+packaging==24.1
+tensorrt-cu12
+numexpr

@@ -15,9 +15,276 @@ onnxruntime.log_verbosity_level = -1
 import rope.FaceUtil as faceutil
 import pickle
 import math
+from torch.cuda import nvtx
+from collections import OrderedDict
+import platform
+from rope.EngineBuilder import onnx_to_trt as onnx2trt
+import os
+from packaging import version
 from dfl.DFMModel import DFMModel
 from dfl.xlib.onnxruntime.device import ORTDeviceInfo
+from queue import Queue
+from threading import Lock
 
+try:
+    import tensorrt as trt
+    import ctypes
+except ModuleNotFoundError:
+    print("No TensorRT Found")
+
+# Dizionario per la conversione dei tipi di dati numpy a torch
+numpy_to_torch_dtype_dict = {
+    np.uint8: torch.uint8,
+    np.int8: torch.int8,
+    np.int16: torch.int16,
+    np.int32: torch.int32,
+    np.int64: torch.int64,
+    np.float16: torch.float16,
+    np.float32: torch.float32,
+    np.float64: torch.float64,
+    np.complex64: torch.complex64,
+    np.complex128: torch.complex128,
+}
+if np.version.full_version >= "1.24.0":
+    numpy_to_torch_dtype_dict[np.bool_] = torch.bool
+else:
+    numpy_to_torch_dtype_dict[np.bool] = torch.bool
+
+# Usa lo stesso logger globale di TensorRT come nella classe EngineBuilder
+TRT_LOGGER = trt.Logger(trt.Logger.ERROR)
+
+# imported from https://github.com/warmshao/FasterLivePortrait/blob/master/src/models/predictor.py
+# adjusted to work with TensorRT 10.3.0
+class TensorRTPredictor:
+    """
+    Implements inference for the TensorRT engine with a pool of execution contexts.
+    """
+
+    def __init__(self, **kwargs):
+        """
+        :param engine_path: The path to the serialized engine to load from disk.
+        :param pool_size: The size of the pool of execution contexts.
+        """
+        global TRT_LOGGER
+
+        # Inizializzazione del modello TensorRT
+        self.engine = None
+        self.context_pool = None
+        self.lock = Lock()
+
+        custom_plugin_path = kwargs.get("custom_plugin_path", None)
+        if custom_plugin_path is not None:
+            # Carica il plugin personalizzato solo una volta
+            if platform.system().lower() == 'linux':
+                ctypes.CDLL(custom_plugin_path, mode=ctypes.RTLD_GLOBAL)
+            else:
+                ctypes.CDLL(custom_plugin_path, mode=ctypes.RTLD_GLOBAL, winmode=0)
+
+        # Load TRT engine
+        engine_path = kwargs.get("model_path", None)
+        self.debug = kwargs.get("debug", False)
+        self.pool_size = kwargs.get("pool_size", 10)
+        assert engine_path, f"model:{engine_path} must exist!"
+
+        # Caricamento dell'engine TensorRT
+        with open(engine_path, "rb") as f, trt.Runtime(TRT_LOGGER) as runtime:
+            assert runtime
+            self.engine = runtime.deserialize_cuda_engine(f.read())
+        assert self.engine
+
+        # Setup I/O bindings e contesto
+        self.inputs = []
+        self.outputs = []
+        self.tensors = OrderedDict()
+
+        # Gestione dei tensori dinamici
+        for idx in range(self.engine.num_io_tensors):
+            name = self.engine.get_tensor_name(idx)
+            is_input = self.engine.get_tensor_mode(name) == trt.TensorIOMode.INPUT
+            shape = self.engine.get_tensor_shape(name)
+            dtype = trt.nptype(self.engine.get_tensor_dtype(name))
+
+            binding = {
+                "index": idx,
+                "name": name,
+                "dtype": dtype,
+                "shape": list(shape)
+            }
+            if is_input:
+                self.inputs.append(binding)
+            else:
+                self.outputs.append(binding)
+
+        assert len(self.inputs) > 0
+        assert len(self.outputs) > 0
+        self.allocate_max_buffers()
+
+        # Creazione del pool di contesti di esecuzione
+        self.context_pool = Queue(maxsize=self.pool_size)
+        for _ in range(self.pool_size):
+            self.context_pool.put(self.engine.create_execution_context())
+
+    def allocate_max_buffers(self, device="cuda"):
+        nvtx.range_push("allocate_max_buffers")
+        # Supporto per batch dinamico
+        batch_size = 1
+        for idx in range(self.engine.num_io_tensors):
+            binding = self.engine.get_tensor_name(idx)
+            shape = self.engine.get_tensor_shape(binding)
+            is_input = self.engine.get_tensor_mode(binding) == trt.TensorIOMode.INPUT
+            if -1 in shape:
+                if is_input:
+                    shape = self.engine.get_tensor_profile_shape(binding, 0)[-1]
+                    batch_size = shape[0]
+                else:
+                    shape[0] = batch_size
+            dtype = trt.nptype(self.engine.get_tensor_dtype(binding))
+            tensor = torch.empty(
+                tuple(shape), dtype=numpy_to_torch_dtype_dict[dtype]
+            ).to(device=device)
+            self.tensors[binding] = tensor
+        nvtx.range_pop()
+
+    def input_spec(self):
+        """
+        Get the specs for the input tensor of the network. Useful to prepare memory allocations.
+        :return: Two items, the shape of the input tensor and its (numpy) datatype.
+        """
+        specs = []
+        for i, o in enumerate(self.inputs):
+            specs.append((o["name"], o['shape'], o['dtype']))
+            if self.debug:
+                print(f"trt input {i} -> {o['name']} -> {o['shape']}")
+        return specs
+
+    def output_spec(self):
+        """
+        Get the specs for the output tensors of the network. Useful to prepare memory allocations.
+        :return: A list with two items per element, the shape and (numpy) datatype of each output tensor.
+        """
+        specs = []
+        for i, o in enumerate(self.outputs):
+            specs.append((o["name"], o['shape'], o['dtype']))
+            if self.debug:
+                print(f"trt output {i} -> {o['name']} -> {o['shape']}")
+        return specs
+
+    def adjust_buffer(self, feed_dict, context):
+        """
+        Adjust input buffer sizes and set input shapes in the given execution context.
+        :param feed_dict: A dictionary of inputs as numpy arrays.
+        :param context: The TensorRT execution context to set input shapes.
+        """
+        nvtx.range_push("adjust_buffer")
+        for name, buf in feed_dict.items():
+            input_tensor = self.tensors[name]
+            current_shape = list(buf.shape)
+            slices = tuple(slice(0, dim) for dim in current_shape)
+            input_tensor[slices].copy_(buf)
+            # Imposta la forma di input nel contesto fornito
+            context.set_input_shape(name, current_shape)
+        nvtx.range_pop()
+
+    def predict(self, feed_dict):
+        """
+        Execute inference on a batch of images in synchronous mode using execute_v2.
+        :param feed_dict: A dictionary of inputs as numpy arrays.
+        :return: A dictionary of outputs as PyTorch tensors.
+        """
+        # Ottieni un contesto dal pool
+        with self.lock:
+            context = self.context_pool.get()
+
+        try:
+            nvtx.range_push("set_tensors")
+            # Passa il contesto a adjust_buffer
+            self.adjust_buffer(feed_dict, context)
+
+            for name, tensor in self.tensors.items():
+                assert tensor.dtype == torch.float32, f"Tensor '{name}' should be torch.float32 but is {tensor.dtype}"
+                context.set_tensor_address(name, tensor.data_ptr())
+            
+            nvtx.range_pop()
+
+            # Prepara i binding per execute_v2()
+            bindings = [tensor.data_ptr() for tensor in self.tensors.values()]
+
+            # Esecuzione sincrona con execute_v2()
+            nvtx.range_push("execute")
+            noerror = context.execute_v2(bindings)
+            if not noerror:
+                raise ValueError("ERROR: inference failed.")
+            nvtx.range_pop()
+
+            return self.tensors
+
+        finally:
+            # Restituisci il contesto al pool dopo l'uso
+            with self.lock:
+                self.context_pool.put(context)
+
+    def predict_async(self, feed_dict, stream):
+        """
+        Execute inference on a batch of images in asynchronous mode using execute_async_v3.
+        :param feed_dict: A dictionary of inputs as numpy arrays.
+        :param stream: A CUDA stream for asynchronous execution.
+        :return: A dictionary of outputs as PyTorch tensors.
+        """
+        # Ottieni un contesto dal pool
+        with self.lock:
+            context = self.context_pool.get()
+
+        try:
+            nvtx.range_push("set_tensors")
+            # Passa il contesto a adjust_buffer
+            self.adjust_buffer(feed_dict, context)
+
+            for name, tensor in self.tensors.items():
+                assert tensor.dtype == torch.float32, f"Tensor '{name}' should be torch.float32 but is {tensor.dtype}"
+                context.set_tensor_address(name, tensor.data_ptr())
+            
+            nvtx.range_pop()
+
+            # Esecuzione asincrona con execute_async_v3()
+            nvtx.range_push("execute_async")
+            noerror = context.execute_async_v3(stream)
+            if not noerror:
+                raise ValueError("ERROR: inference failed.")
+            nvtx.range_pop()
+
+            return self.tensors
+
+        finally:
+            # Restituisci il contesto al pool dopo l'uso
+            with self.lock:
+                self.context_pool.put(context)
+
+    def cleanup(self):
+        """
+        Clean up all resources associated with the TensorRTPredictor.
+        This method should be called explicitly before deleting the object.
+        """
+        # Pulisci l'engine TensorRT
+        if hasattr(self, 'engine') and self.engine is not None:
+            del self.engine  # Libera l'engine di TensorRT
+            self.engine = None  # Imposta a None per assicurarti che il GC lo raccolga
+
+        # Pulisci il pool di contesti di esecuzione
+        if hasattr(self, 'context_pool') and self.context_pool is not None:
+            while not self.context_pool.empty():
+                context = self.context_pool.get()
+                del context  # Libera ogni contesto
+            self.context_pool = None  # Imposta a None per il GC
+
+        # Imposta gli attributi su None per garantire la pulizia
+        self.inputs = None
+        self.outputs = None
+        self.tensors = None
+        self.pool_size = None
+
+    def __del__(self):
+        # Richiama il metodo cleanup nel distruttore per maggiore sicurezza
+        self.cleanup()
 
 class Models():
     def __init__(self):
@@ -26,6 +293,7 @@ class Models():
         self.providers = [
             ('CUDAExecutionProvider'),
             ('CPUExecutionProvider')]
+        self.provider_name = 'CUDAExecutionProvider'
         self.retinaface_model = []
         self.yoloface_model = []
         self.scrdf_model = []
@@ -35,6 +303,7 @@ class Models():
         self.mean_lmk = []
         self.face_landmark_98_model = []
         self.face_landmark_106_model = []
+        self.face_landmark_203_model = []
         self.face_landmark_478_model = []
         self.face_blendshapes_model = []
         self.resnet50_model, self.anchors  = [], []
@@ -45,8 +314,6 @@ class Models():
         self.recognition_simswap_model = []
         self.recognition_ghost_model = []
         self.swapper_model = []
-        self.swapper_model_kps = []
-        self.swapper_model_swap = []
         self.simswap512_model = []
         self.ghostfacev1swap_model = []
         self.ghostfacev2swap_model = []
@@ -97,9 +364,20 @@ class Models():
             466, 468, 469, 470, 471, 472, 473, 474, 475, 476, 477
         ]
 
+        # Face Editor
+        self.lp_motion_extractor_model = []
+        self.lp_appearance_feature_extractor_model = []
+        self.lp_stitching_model = []
+        self.lp_stitching_eye_model = []
+        self.lp_stitching_lip_model = []
+        self.lp_warping_spade_fix_model = []
+        self.lp_mask_crop = faceutil.create_faded_inner_mask(size=(512, 512), border_thickness=5, fade_thickness=15, blur_radius=5, device='cuda')
+        self.lp_mask_crop = torch.unsqueeze(self.lp_mask_crop, 0)
+        self.lp_mask_crop = torch.mul(self.lp_mask_crop, 255.)
+
     def switch_providers_priority(self, provider_name):
         match provider_name:
-            case "TensorRT":
+            case "TensorRT" | "TensorRT-Engine":
                 providers = [
                                 ('TensorrtExecutionProvider', {
                                     'trt_engine_cache_enable': True,
@@ -114,6 +392,10 @@ class Models():
                                 ('CUDAExecutionProvider'),
                                 ('CPUExecutionProvider')
                             ]
+                if version.parse(trt.__version__) < version.parse("10.2.0") and provider_name == "TensorRT-Engine":
+                    print("TensorRT-Engine provider cannot be used when TensorRT version is lower than 10.2.0.")
+                    provider_name = "TensorRT"
+
             case "CPU":
                 providers = [
                                 ('CPUExecutionProvider'),
@@ -126,6 +408,9 @@ class Models():
                             ]
 
         self.providers = providers
+        self.provider_name = provider_name
+
+        return self.provider_name
 
     def get_gpu_memory(self):
         command = "nvidia-smi --query-gpu=memory.total --format=csv"
@@ -140,38 +425,39 @@ class Models():
 
         return memory_used, memory_total[0]
 
-    def run_detect(self, img, detect_mode='Retinaface', max_num=1, score=0.5, use_landmark_detection=False, landmark_detect_mode='98', landmark_score=0.5, from_points=False, rotation_angles:list[int]=[0]):
+    def run_detect(self, img, detect_mode='Retinaface', max_num=1, score=0.5, use_landmark_detection=False, landmark_detect_mode='203', landmark_score=0.5, from_points=False, rotation_angles:list[int]=[0]):
         bboxes = []
+        kpss_5 = []
         kpss = []
 
         if detect_mode=='Retinaface':
             if not self.retinaface_model:
                 self.retinaface_model = onnxruntime.InferenceSession('./models/det_10g.onnx', providers=self.providers)
 
-            bboxes, kpss = self.detect_retinaface(img, max_num=max_num, score=score, use_landmark_detection=use_landmark_detection, landmark_detect_mode=landmark_detect_mode, landmark_score=landmark_score, from_points=from_points, rotation_angles=rotation_angles)
+            bboxes, kpss_5, kpss = self.detect_retinaface(img, max_num=max_num, score=score, use_landmark_detection=use_landmark_detection, landmark_detect_mode=landmark_detect_mode, landmark_score=landmark_score, from_points=from_points, rotation_angles=rotation_angles)
 
         elif detect_mode=='SCRDF':
             if not self.scrdf_model:
                 self.scrdf_model = onnxruntime.InferenceSession('./models/scrfd_2.5g_bnkps.onnx', providers=self.providers)
 
-            bboxes, kpss = self.detect_scrdf(img, max_num=max_num, score=score, use_landmark_detection=use_landmark_detection, landmark_detect_mode=landmark_detect_mode, landmark_score=landmark_score, from_points=from_points, rotation_angles=rotation_angles)
+            bboxes, kpss_5, kpss = self.detect_scrdf(img, max_num=max_num, score=score, use_landmark_detection=use_landmark_detection, landmark_detect_mode=landmark_detect_mode, landmark_score=landmark_score, from_points=from_points, rotation_angles=rotation_angles)
 
         elif detect_mode=='Yolov8':
             if not self.yoloface_model:
                 self.yoloface_model = onnxruntime.InferenceSession('./models/yoloface_8n.onnx', providers=self.providers)
-                #self.insight106_model = onnxruntime.InferenceSession('./models/2d106det.onnx', providers=self.providers)
 
-            bboxes, kpss = self.detect_yoloface(img, max_num=max_num, score=score, use_landmark_detection=use_landmark_detection, landmark_detect_mode=landmark_detect_mode, landmark_score=landmark_score, from_points=from_points, rotation_angles=rotation_angles)
+            bboxes, kpss_5, kpss = self.detect_yoloface(img, max_num=max_num, score=score, use_landmark_detection=use_landmark_detection, landmark_detect_mode=landmark_detect_mode, landmark_score=landmark_score, from_points=from_points, rotation_angles=rotation_angles)
 
         elif detect_mode=='Yunet':
             if not self.yunet_model:
                 self.yunet_model = onnxruntime.InferenceSession('./models/yunet_n_640_640.onnx', providers=self.providers)
 
-            bboxes, kpss = self.detect_yunet(img, max_num=max_num, score=score, use_landmark_detection=use_landmark_detection, landmark_detect_mode=landmark_detect_mode, landmark_score=landmark_score, from_points=from_points, rotation_angles=rotation_angles)
+            bboxes, kpss_5, kpss = self.detect_yunet(img, max_num=max_num, score=score, use_landmark_detection=use_landmark_detection, landmark_detect_mode=landmark_detect_mode, landmark_score=landmark_score, from_points=from_points, rotation_angles=rotation_angles)
 
-        return bboxes, kpss
+        return bboxes, kpss_5, kpss
 
-    def run_detect_landmark(self, img, bbox, det_kpss, detect_mode='98', score=0.5, from_points=False):
+    def run_detect_landmark(self, img, bbox, det_kpss, detect_mode='203', score=0.5, from_points=False):
+        kpss_5 = []
         kpss = []
         scores = []
 
@@ -197,13 +483,13 @@ class Models():
                             for cy, cx in product(dense_cy, dense_cx):
                                 self.anchors += [cx, cy, s_kx, s_ky]
 
-            kpss, scores = self.detect_face_landmark_5(img, bbox=bbox, det_kpss=det_kpss, from_points=from_points)
+            kpss_5, kpss, scores = self.detect_face_landmark_5(img, bbox=bbox, det_kpss=det_kpss, from_points=from_points)
 
         elif detect_mode=='68':
             if not self.face_landmark_68_model:
                 self.face_landmark_68_model = onnxruntime.InferenceSession('./models/2dfan4.onnx', providers=self.providers)
 
-            kpss, scores = self.detect_face_landmark_68(img, bbox=bbox, det_kpss=det_kpss, convert68_5=True, from_points=from_points)
+            kpss_5, kpss, scores = self.detect_face_landmark_68(img, bbox=bbox, det_kpss=det_kpss, from_points=from_points)
 
         elif detect_mode=='3d68':
             if not self.face_landmark_3d68_model:
@@ -211,23 +497,31 @@ class Models():
                 with open('./models/meanshape_68.pkl', 'rb') as f:
                     self.mean_lmk = pickle.load(f)
 
-            kpss, scores = self.detect_face_landmark_3d68(img, bbox=bbox, det_kpss=det_kpss, convert68_5=True, from_points=from_points)
+            kpss_5, kpss, scores = self.detect_face_landmark_3d68(img, bbox=bbox, det_kpss=det_kpss, from_points=from_points)
 
-            return kpss, scores
+            return kpss_5, kpss, scores
 
         elif detect_mode=='98':
             if not self.face_landmark_98_model:
                 self.face_landmark_98_model = onnxruntime.InferenceSession('./models/peppapig_teacher_Nx3x256x256.onnx', providers=self.providers)
 
-            kpss, scores = self.detect_face_landmark_98(img, bbox=bbox, det_kpss=det_kpss, convert98_5=True, from_points=from_points)
+            kpss_5, kpss, scores = self.detect_face_landmark_98(img, bbox=bbox, det_kpss=det_kpss, from_points=from_points)
 
         elif detect_mode=='106':
             if not self.face_landmark_106_model:
                 self.face_landmark_106_model = onnxruntime.InferenceSession('./models/2d106det.onnx', providers=self.providers)
 
-            kpss, scores = self.detect_face_landmark_106(img, bbox=bbox, det_kpss=det_kpss, convert106_5=True, from_points=from_points)
+            kpss_5, kpss, scores = self.detect_face_landmark_106(img, bbox=bbox, det_kpss=det_kpss, from_points=from_points)
 
-            return kpss, scores
+            return kpss_5, kpss, scores
+
+        elif detect_mode=='203':
+            if not self.face_landmark_203_model:
+                self.face_landmark_203_model = onnxruntime.InferenceSession('./models/landmark.onnx', providers=self.providers)
+
+            kpss_5, kpss, scores = self.detect_face_landmark_203(img, bbox=bbox, det_kpss=det_kpss, from_points=from_points)
+
+            return kpss_5, kpss, scores
 
         elif detect_mode=='478':
             if not self.face_landmark_478_model:
@@ -236,18 +530,18 @@ class Models():
             if not self.face_blendshapes_model:
                 self.face_blendshapes_model = onnxruntime.InferenceSession('./models/face_blendshapes_Nx146x2.onnx', providers=self.providers)
 
-            kpss, scores = self.detect_face_landmark_478(img, bbox=bbox, det_kpss=det_kpss, convert478_5=True, from_points=from_points)
+            kpss_5, kpss, scores = self.detect_face_landmark_478(img, bbox=bbox, det_kpss=det_kpss, from_points=from_points)
 
-            return kpss, scores
+            return kpss_5, kpss, scores
 
-        if len(kpss) > 0:
+        if len(kpss_5) > 0:
             if len(scores) > 0:
                 if np.mean(scores) >= score:
-                    return kpss, scores
+                    return kpss_5, kpss, scores
             else:
-                return kpss, scores
+                return kpss_5, kpss, scores
 
-        return [], []
+        return [], [], []
 
     def delete_models(self):
         self.retinaface_model = []
@@ -259,6 +553,7 @@ class Models():
         self.mean_lmk = []
         self.face_landmark_98_model = []
         self.face_landmark_106_model = []
+        self.face_landmark_203_model = []
         self.face_landmark_478_model = []
         self.face_blendshapes_model = []
         self.resnet50_model = []
@@ -297,6 +592,49 @@ class Models():
         self.dfl_model = []
         self.dfl_models = {}
 
+        # Face Editor
+        if isinstance(self.lp_motion_extractor_model, TensorRTPredictor):
+            # È un'istanza di TensorRTPredictor
+            self.lp_motion_extractor_model.cleanup()
+
+        del self.lp_motion_extractor_model
+        self.lp_motion_extractor_model = None
+
+        if isinstance(self.lp_appearance_feature_extractor_model, TensorRTPredictor):
+            # È un'istanza di TensorRTPredictor
+            self.lp_appearance_feature_extractor_model.cleanup()
+
+        del self.lp_appearance_feature_extractor_model
+        self.lp_appearance_feature_extractor_model = None
+
+        if isinstance(self.lp_stitching_model, TensorRTPredictor):
+            # È un'istanza di TensorRTPredictor
+            self.lp_stitching_model.cleanup()
+
+        del self.lp_stitching_model
+        self.lp_stitching_model = None
+
+        if isinstance(self.lp_stitching_eye_model, TensorRTPredictor):
+            # È un'istanza di TensorRTPredictor
+            self.lp_stitching_eye_model.cleanup()
+
+        del self.lp_stitching_eye_model
+        self.lp_stitching_eye_model = None
+
+        if isinstance(self.lp_stitching_lip_model, TensorRTPredictor):
+            # È un'istanza di TensorRTPredictor
+            self.lp_stitching_lip_model.cleanup()
+
+        del self.lp_stitching_lip_model
+        self.lp_stitching_lip_model = None
+
+        if isinstance(self.lp_warping_spade_fix_model, TensorRTPredictor):
+            # È un'istanza di TensorRTPredictor
+            self.lp_warping_spade_fix_model.cleanup()
+
+        del self.lp_warping_spade_fix_model
+        self.lp_warping_spade_fix_model = None
+
     def run_recognize(self, img, kps, similarity_type='Opal', face_swapper_model='Inswapper128'):
         if face_swapper_model == 'Inswapper128':
             if not self.recognition_model:
@@ -333,8 +671,6 @@ class Models():
             cuda_options = {"arena_extend_strategy": "kSameAsRequested", 'cudnn_conv_algo_search': 'DEFAULT'}
             sess_options = onnxruntime.SessionOptions()
             sess_options.enable_cpu_mem_arena = False
-
-            # self.swapper_model = onnxruntime.InferenceSession( "./models/inswapper_128_last_cubic.onnx", sess_options, providers=[('CUDAExecutionProvider', cuda_options), 'CPUExecutionProvider'])
 
             self.swapper_model = onnxruntime.InferenceSession( "./models/inswapper_128.fp16.onnx", providers=self.providers)
 
@@ -392,127 +728,21 @@ class Models():
             output_name = '1549'
             #output_name2 = 'onnx::ConvTranspose_415'
 
-        '''
-        ouput2 = torch.empty((1,1024,2,2), dtype=torch.float32, device='cuda').contiguous()
-        input63 = torch.empty((1,2048,4,4), dtype=torch.float32, device='cuda').contiguous()
-        input75 = torch.empty((1,1024,8,8), dtype=torch.float32, device='cuda').contiguous()
-        input87 = torch.empty((1,512,16,16), dtype=torch.float32, device='cuda').contiguous()
-        input99 = torch.empty((1,256,32,32), dtype=torch.float32, device='cuda').contiguous()
-        input111 = torch.empty((1,128,64,64), dtype=torch.float32, device='cuda').contiguous()
-        input123 = torch.empty((1,64,128,128), dtype=torch.float32, device='cuda').contiguous()
-        input127 = torch.empty((1,64,256,256), dtype=torch.float32, device='cuda').contiguous()
-        '''
-
         io_binding = ghostfaceswap_model.io_binding()
         io_binding.bind_input(name='target', device_type='cuda', device_id=0, element_type=np.float32, shape=(1,3,256,256), buffer_ptr=image.data_ptr())
         io_binding.bind_input(name='source', device_type='cuda', device_id=0, element_type=np.float32, shape=(1,512), buffer_ptr=embedding.data_ptr())
         io_binding.bind_output(name=output_name, device_type='cuda', device_id=0, element_type=np.float32, shape=(1,3,256,256), buffer_ptr=output.data_ptr())
-        '''
-        io_binding.bind_output(name=output_name2, device_type='cuda', device_id=0, element_type=np.float32, shape=(1,1024,2,2), buffer_ptr=ouput2.data_ptr())
-        io_binding.bind_output(name='input.63', device_type='cuda', device_id=0, element_type=np.float32, shape=(1,2048,4,4), buffer_ptr=input63.data_ptr())
-        io_binding.bind_output(name='input.75', device_type='cuda', device_id=0, element_type=np.float32, shape=(1,1024,8,8), buffer_ptr=input75.data_ptr())
-        io_binding.bind_output(name='input.87', device_type='cuda', device_id=0, element_type=np.float32, shape=(1,512,16,16), buffer_ptr=input87.data_ptr())
-        io_binding.bind_output(name='input.99', device_type='cuda', device_id=0, element_type=np.float32, shape=(1,256,32,32), buffer_ptr=input99.data_ptr())
-        io_binding.bind_output(name='input.111', device_type='cuda', device_id=0, element_type=np.float32, shape=(1,128,64,64), buffer_ptr=input111.data_ptr())
-        io_binding.bind_output(name='input.123', device_type='cuda', device_id=0, element_type=np.float32, shape=(1,64,128,128), buffer_ptr=input123.data_ptr())
-        io_binding.bind_output(name='input.127', device_type='cuda', device_id=0, element_type=np.float32, shape=(1,64,256,256), buffer_ptr=input127.data_ptr())
-        '''
 
         self.syncvec.cpu()
         ghostfaceswap_model.run_with_iobinding(io_binding)
-
 
     def calc_swapper_latent_dfl(self, source_embedding):
         latent = source_embedding.reshape((1,-1))
 
         return latent
 
-    def run_swap_stg1(self, embedding):
-
-        # Load model
-        if not self.swapper_model_kps:
-            self.swapper_model_kps = onnxruntime.InferenceSession( "./models/inswapper_kps.onnx", providers=self.providers)
-
-        # Wacky data structure
-        io_binding = self.swapper_model_kps.io_binding()
-        kps_1 = torch.ones((1, 2048), dtype=torch.float16, device='cuda').contiguous()
-        kps_2 = torch.ones((1, 2048), dtype=torch.float16, device='cuda').contiguous()
-        kps_3 = torch.ones((1, 2048), dtype=torch.float16, device='cuda').contiguous()
-        kps_4 = torch.ones((1, 2048), dtype=torch.float16, device='cuda').contiguous()
-        kps_5 = torch.ones((1, 2048), dtype=torch.float16, device='cuda').contiguous()
-        kps_6 = torch.ones((1, 2048), dtype=torch.float16, device='cuda').contiguous()
-        kps_7 = torch.ones((1, 2048), dtype=torch.float16, device='cuda').contiguous()
-        kps_8 = torch.ones((1, 2048), dtype=torch.float16, device='cuda').contiguous()
-        kps_9 = torch.ones((1, 2048), dtype=torch.float16, device='cuda').contiguous()
-        kps_10 = torch.ones((1, 2048), dtype=torch.float16, device='cuda').contiguous()
-        kps_11 = torch.ones((1, 2048), dtype=torch.float16, device='cuda').contiguous()
-        kps_12 = torch.ones((1, 2048), dtype=torch.float16, device='cuda').contiguous()
-
-        # Bind the data structures
-        io_binding.bind_input(name='source', device_type='cuda', device_id=0, element_type=np.float32, shape=(1, 512), buffer_ptr=embedding.data_ptr())
-        io_binding.bind_output(name='1', device_type='cuda', device_id=0, element_type=np.float16, shape=(1, 2048), buffer_ptr=kps_1.data_ptr())
-        io_binding.bind_output(name='2', device_type='cuda', device_id=0, element_type=np.float16, shape=(1, 2048), buffer_ptr=kps_2.data_ptr())
-        io_binding.bind_output(name='3', device_type='cuda', device_id=0, element_type=np.float16, shape=(1, 2048), buffer_ptr=kps_3.data_ptr())
-        io_binding.bind_output(name='4', device_type='cuda', device_id=0, element_type=np.float16, shape=(1, 2048), buffer_ptr=kps_4.data_ptr())
-        io_binding.bind_output(name='5', device_type='cuda', device_id=0, element_type=np.float16, shape=(1, 2048), buffer_ptr=kps_5.data_ptr())
-        io_binding.bind_output(name='6', device_type='cuda', device_id=0, element_type=np.float16, shape=(1, 2048), buffer_ptr=kps_6.data_ptr())
-        io_binding.bind_output(name='7', device_type='cuda', device_id=0, element_type=np.float16, shape=(1, 2048), buffer_ptr=kps_7.data_ptr())
-        io_binding.bind_output(name='8', device_type='cuda', device_id=0, element_type=np.float16, shape=(1, 2048), buffer_ptr=kps_8.data_ptr())
-        io_binding.bind_output(name='9', device_type='cuda', device_id=0, element_type=np.float16, shape=(1, 2048), buffer_ptr=kps_9.data_ptr())
-        io_binding.bind_output(name='10', device_type='cuda', device_id=0, element_type=np.float16, shape=(1, 2048), buffer_ptr=kps_10.data_ptr())
-        io_binding.bind_output(name='11', device_type='cuda', device_id=0, element_type=np.float16, shape=(1, 2048), buffer_ptr=kps_11.data_ptr())
-        io_binding.bind_output(name='12', device_type='cuda', device_id=0, element_type=np.float16, shape=(1, 2048), buffer_ptr=kps_12.data_ptr())
-
-        self.syncvec.cpu()
-        self.swapper_model_kps.run_with_iobinding(io_binding)
-
-        # List of pointers
-        holder = []
-        holder.append(kps_1)
-        holder.append(kps_2)
-        holder.append(kps_3)
-        holder.append(kps_4)
-        holder.append(kps_5)
-        holder.append(kps_6)
-        holder.append(kps_7)
-        holder.append(kps_8)
-        holder.append(kps_9)
-        holder.append(kps_10)
-        holder.append(kps_11)
-        holder.append(kps_12)
-
-        return holder
-
-    def run_swap_stg2(self, image, holder, output):
-        if not self.swapper_model_swap:
-            self.swapper_model_swap = onnxruntime.InferenceSession( "./models/inswapper_swap.onnx", providers=self.providers)
-
-        io_binding = self.swapper_model_swap.io_binding()
-        io_binding.bind_input(name='target', device_type='cuda', device_id=0, element_type=np.float32, shape=(1, 3, 128, 128), buffer_ptr=image.data_ptr())
-        io_binding.bind_input(name='onnx::Unsqueeze_170', device_type='cuda', device_id=0, element_type=np.float16, shape=(1, 2048), buffer_ptr=holder[0].data_ptr())
-        io_binding.bind_input(name='onnx::Unsqueeze_224', device_type='cuda', device_id=0, element_type=np.float16, shape=(1, 2048), buffer_ptr=holder[1].data_ptr())
-        io_binding.bind_input(name='onnx::Unsqueeze_278', device_type='cuda', device_id=0, element_type=np.float16, shape=(1, 2048), buffer_ptr=holder[2].data_ptr())
-        io_binding.bind_input(name='onnx::Unsqueeze_332', device_type='cuda', device_id=0, element_type=np.float16, shape=(1, 2048), buffer_ptr=holder[3].data_ptr())
-        io_binding.bind_input(name='onnx::Unsqueeze_386', device_type='cuda', device_id=0, element_type=np.float16, shape=(1, 2048), buffer_ptr=holder[4].data_ptr())
-        io_binding.bind_input(name='onnx::Unsqueeze_440', device_type='cuda', device_id=0, element_type=np.float16, shape=(1, 2048), buffer_ptr=holder[5].data_ptr())
-        io_binding.bind_input(name='onnx::Unsqueeze_494', device_type='cuda', device_id=0, element_type=np.float16, shape=(1, 2048), buffer_ptr=holder[6].data_ptr())
-        io_binding.bind_input(name='onnx::Unsqueeze_548', device_type='cuda', device_id=0, element_type=np.float16, shape=(1, 2048), buffer_ptr=holder[7].data_ptr())
-        io_binding.bind_input(name='onnx::Unsqueeze_602', device_type='cuda', device_id=0, element_type=np.float16, shape=(1, 2048), buffer_ptr=holder[8].data_ptr())
-        io_binding.bind_input(name='onnx::Unsqueeze_656', device_type='cuda', device_id=0, element_type=np.float16, shape=(1, 2048), buffer_ptr=holder[9].data_ptr())
-        io_binding.bind_input(name='onnx::Unsqueeze_710', device_type='cuda', device_id=0, element_type=np.float16, shape=(1, 2048), buffer_ptr=holder[10].data_ptr())
-        io_binding.bind_input(name='onnx::Unsqueeze_764', device_type='cuda', device_id=0, element_type=np.float16, shape=(1, 2048), buffer_ptr=holder[11].data_ptr())
-        io_binding.bind_output(name='output', device_type='cuda', device_id=0, element_type=np.float32, shape=(1, 3, 128, 128), buffer_ptr=output.data_ptr())
-
-        self.syncvec.cpu()
-        self.swapper_model_swap.run_with_iobinding(io_binding)
     def run_GFPGAN(self, image, output):
         if not self.GFPGAN_model:
-            # cuda_options = {"arena_extend_strategy": "kSameAsRequested", 'cudnn_conv_algo_search': 'DEFAULT'}
-            # sess_options = onnxruntime.SessionOptions()
-            # sess_options.enable_cpu_mem_arena = False
-
-            # self.GFPGAN_model = onnxruntime.InferenceSession( "./models/GFPGANv1.4.onnx", sess_options, providers=[("CUDAExecutionProvider", cuda_options), 'CPUExecutionProvider'])
-
             self.GFPGAN_model = onnxruntime.InferenceSession( "./models/GFPGANv1.4.onnx", providers=self.providers)
 
         io_binding = self.GFPGAN_model.io_binding()
@@ -625,68 +855,62 @@ class Models():
     def run_enhance_frame_tile_process(self, img, enhancer_type, tile_size=256, scale=1):
         _, _, height, width = img.shape
 
+        # Calcolo del numero di tile necessari
         tiles_x = math.ceil(width / tile_size)
         tiles_y = math.ceil(height / tile_size)
 
+        # Calcolo del padding necessario per adattare l'immagine alle dimensioni dei tile
         pad_right = (tile_size - (width % tile_size)) % tile_size
         pad_bottom = (tile_size - (height % tile_size)) % tile_size
 
+        # Padding dell'immagine se necessario
         if pad_right != 0 or pad_bottom != 0:
             img = torch.nn.functional.pad(img, (0, pad_right, 0, pad_bottom), 'constant', 0)
 
+        # Creazione di un output tensor vuoto
         b, c, h, w = img.shape
-        output_shape = (b, c, h * scale, w * scale)
-        output = torch.empty((output_shape), dtype=torch.float32, device='cuda').contiguous()
+        output = torch.empty((b, c, h * scale, w * scale), dtype=torch.float32, device='cuda').contiguous()
 
-        match enhancer_type:
-            case 'RealEsrgan-x2-Plus':
-                fn_upscaler = self.run_realesrganx2
-            case 'RealEsrgan-x4-Plus':
-                fn_upscaler = self.run_realesrganx4
-            case 'BSRGan-x2':
-                fn_upscaler = self.run_bsrganx2
-            case 'BSRGan-x4':
-                fn_upscaler = self.run_bsrganx4
-            case 'UltraSharp-x4':
-                fn_upscaler = self.run_ultrasharpx4
-            case 'UltraMix-x4':
-                fn_upscaler = self.run_ultramixx4
-            case 'RealEsr-General-x4v3':
-                fn_upscaler = self.run_realesrx4v3
-            case _:
-                if pad_right != 0 or pad_bottom != 0:
-                    img = v2.functional.crop(img, 0,0, height, width)
+        # Selezione della funzione di upscaling in base al tipo
+        upscaler_functions = {
+            'RealEsrgan-x2-Plus': self.run_realesrganx2,
+            'RealEsrgan-x4-Plus': self.run_realesrganx4,
+            'BSRGan-x2': self.run_bsrganx2,
+            'BSRGan-x4': self.run_bsrganx4,
+            'UltraSharp-x4': self.run_ultrasharpx4,
+            'UltraMix-x4': self.run_ultramixx4,
+            'RealEsr-General-x4v3': self.run_realesrx4v3
+        }
 
-                return img
+        fn_upscaler = upscaler_functions.get(enhancer_type)
 
-        for j in range(tiles_y):
-            for i in range(tiles_x):
-                x_start = i * tile_size
-                y_start = j * tile_size
-                x_end = x_start + tile_size
-                y_end = y_start + tile_size
+        if not fn_upscaler:  # Se il tipo di enhancer non è valido
+            if pad_right != 0 or pad_bottom != 0:
+                img = v2.functional.crop(img, 0, 0, height, width)
+            return img
 
-                input_tile = img[:, :, y_start:y_end, x_start:x_end].contiguous()
-                output_tile = torch.empty((input_tile.shape[0], input_tile.shape[1], input_tile.shape[2] * scale, input_tile.shape[3] * scale), dtype=torch.float32, device='cuda').contiguous()
+        with torch.no_grad():  # Disabilita il calcolo del gradiente
+            # Elaborazione dei tile
+            for j in range(tiles_y):
+                for i in range(tiles_x):
+                    x_start, y_start = i * tile_size, j * tile_size
+                    x_end, y_end = x_start + tile_size, y_start + tile_size
 
-                # upscale tile
-                fn_upscaler(input_tile, output_tile)
+                    # Estrazione del tile di input
+                    input_tile = img[:, :, y_start:y_end, x_start:x_end].contiguous()
+                    output_tile = torch.empty((input_tile.shape[0], input_tile.shape[1], input_tile.shape[2] * scale, input_tile.shape[3] * scale), dtype=torch.float32, device='cuda').contiguous()
 
-                output_y_start = y_start * scale
-                output_x_start = x_start * scale
-                output_y_end = output_y_start + output_tile.shape[2]
-                output_x_end = output_x_start + output_tile.shape[3]
+                    # Upscaling del tile
+                    fn_upscaler(input_tile, output_tile)
 
-                output[:, :, output_y_start:output_y_end, output_x_start:output_x_end] = output_tile
+                    # Inserimento del tile upscalato nel tensor di output
+                    output_y_start, output_x_start = y_start * scale, x_start * scale
+                    output_y_end, output_x_end = output_y_start + output_tile.shape[2], output_x_start + output_tile.shape[3]
+                    output[:, :, output_y_start:output_y_end, output_x_start:output_x_end] = output_tile
 
-        if pad_right != 0 or pad_bottom != 0:
-            output = v2.functional.crop(output, 0,0, height * scale, width * scale)
-
-        '''
-        if scale != 1 and to_original_size == True:
-            t_resize = v2.Resize((height, width), interpolation=v2.InterpolationMode.BILINEAR, antialias=True)
-            output = t_resize(output)
-        '''
+            # Ritaglio dell'output per rimuovere il padding aggiunto
+            if pad_right != 0 or pad_bottom != 0:
+                output = v2.functional.crop(output, 0, 0, height * scale, width * scale)
 
         return output
 
@@ -867,7 +1091,6 @@ class Models():
         img_height, img_width = (img.size()[1], img.size()[2])
         im_ratio = torch.div(img_height, img_width)
 
-        # model_ratio = float(input_size[1]) / input_size[0]
         model_ratio = 1.0
         if im_ratio > model_ratio:
             new_height = input_size[1]
@@ -1031,7 +1254,7 @@ class Models():
                 scores_list.append(pos_scores)
 
         if len(bboxes_list) == 0:
-            return [], []
+            return [], [], []
 
         scores = np.vstack(scores_list)
         scores_ravel = scores.ravel()
@@ -1082,7 +1305,6 @@ class Models():
         #if max_num > 0 and det.shape[0] > max_num:
         if max_num > 0 and det.shape[0] > 1:
             area = (det[:, 2] - det[:, 0]) * (det[:, 3] - det[:, 1])
-            #det_img_center = det_img.shape[0] // 2, det_img.shape[1] // 2
             det_img_center = img_height // 2, img_width // 2
             offsets = np.vstack([
                 (det[:, 0] + det[:, 2]) / 2 - det_img_center[1],
@@ -1102,218 +1324,20 @@ class Models():
         # delete score column
         det = np.delete(det, 4, 1)
 
-        if use_landmark_detection and len(kpss) > 0:
-            for i in range(kpss.shape[0]):
-                landmark_kpss, landmark_scores = self.run_detect_landmark(img_landmark, det[i], kpss[i], landmark_detect_mode, landmark_score, from_points)
-                if len(landmark_kpss) > 0:
+        kpss_5 = kpss.copy()
+        if use_landmark_detection and len(kpss_5) > 0:
+            kpss = []
+            for i in range(kpss_5.shape[0]):
+                landmark_kpss_5, landmark_kpss, landmark_scores = self.run_detect_landmark(img_landmark, det[i], kpss_5[i], landmark_detect_mode, landmark_score, from_points)
+                kpss.append(landmark_kpss)
+                if len(landmark_kpss_5) > 0:
                     if len(landmark_scores) > 0:
                         if np.mean(landmark_scores) > np.mean(score_values[i]):
-                            kpss[i] = landmark_kpss
+                            kpss_5[i] = landmark_kpss_5
                     else:
-                        kpss[i] = landmark_kpss
+                        kpss_5[i] = landmark_kpss_5
 
-        return det, kpss
-
-    def detect_retinaface2(self, img, max_num, score):
-
-        # Resize image to fit within the input_size
-        input_size = (640, 640)
-        im_ratio = torch.div(img.size()[1], img.size()[2])
-
-        # model_ratio = float(input_size[1]) / input_size[0]
-        model_ratio = 1.0
-        if im_ratio > model_ratio:
-            new_height = input_size[1]
-            new_width = int(new_height / im_ratio)
-        else:
-            new_width = input_size[0]
-            new_height = int(new_width * im_ratio)
-        det_scale = torch.div(new_height, img.size()[1])
-
-        resize = v2.Resize((new_height, new_width), antialias=True)
-        img = resize(img)
-        img = img.permute(1, 2, 0)
-
-        det_img = torch.zeros((input_size[1], input_size[0], 3), dtype=torch.float32, device='cuda:0')
-        det_img[:new_height, :new_width, :] = img
-
-        # Switch to BGR and normalize
-        det_img = det_img[:, :, [2, 1, 0]]
-        det_img = torch.sub(det_img, 127.5)
-        det_img = torch.div(det_img, 128.0)
-        det_img = det_img.permute(2, 0, 1)  # 3,128,128
-
-        # Prepare data and find model parameters
-        det_img = torch.unsqueeze(det_img, 0).contiguous()
-
-        io_binding = self.retinaface_model.io_binding()
-        io_binding.bind_input(name='input.1', device_type='cuda', device_id=0, element_type=np.float32, shape=det_img.size(), buffer_ptr=det_img.data_ptr())
-
-        io_binding.bind_output('448', 'cuda')
-        io_binding.bind_output('471', 'cuda')
-        io_binding.bind_output('494', 'cuda')
-        io_binding.bind_output('451', 'cuda')
-        io_binding.bind_output('474', 'cuda')
-        io_binding.bind_output('497', 'cuda')
-        io_binding.bind_output('454', 'cuda')
-        io_binding.bind_output('477', 'cuda')
-        io_binding.bind_output('500', 'cuda')
-
-        # Sync and run model
-        self.syncvec.cpu()
-        self.retinaface_model.run_with_iobinding(io_binding)
-
-        net_outs = io_binding.copy_outputs_to_cpu()
-
-        input_height = det_img.shape[2]
-        input_width = det_img.shape[3]
-
-        fmc = 3
-        center_cache = {}
-        scores_list = []
-        bboxes_list = []
-        kpss_list = []
-        for idx, stride in enumerate([8, 16, 32]):
-            scores = net_outs[idx]
-            bbox_preds = net_outs[idx + fmc]
-            bbox_preds = bbox_preds * stride
-
-            kps_preds = net_outs[idx + fmc * 2] * stride
-            height = input_height // stride
-            width = input_width // stride
-            K = height * width
-            key = (height, width, stride)
-            if key in center_cache:
-                anchor_centers = center_cache[key]
-            else:
-                anchor_centers = np.stack(np.mgrid[:height, :width][::-1], axis=-1).astype(np.float32)
-                anchor_centers = (anchor_centers * stride).reshape((-1, 2))
-                anchor_centers = np.stack([anchor_centers] * 2, axis=1).reshape((-1, 2))
-                if len(center_cache) < 100:
-                    center_cache[key] = anchor_centers
-
-            pos_inds = np.where(scores >= score)[0]
-
-            x1 = anchor_centers[:, 0] - bbox_preds[:, 0]
-            y1 = anchor_centers[:, 1] - bbox_preds[:, 1]
-            x2 = anchor_centers[:, 0] + bbox_preds[:, 2]
-            y2 = anchor_centers[:, 1] + bbox_preds[:, 3]
-
-            bboxes = np.stack([x1, y1, x2, y2], axis=-1)
-
-            pos_scores = scores[pos_inds]
-            pos_bboxes = bboxes[pos_inds]
-            scores_list.append(pos_scores)
-            bboxes_list.append(pos_bboxes)
-
-            preds = []
-            for i in range(0, kps_preds.shape[1], 2):
-                px = anchor_centers[:, i % 2] + kps_preds[:, i]
-                py = anchor_centers[:, i % 2 + 1] + kps_preds[:, i + 1]
-
-                preds.append(px)
-                preds.append(py)
-            kpss = np.stack(preds, axis=-1)
-            # kpss = kps_preds
-            kpss = kpss.reshape((kpss.shape[0], -1, 2))
-            pos_kpss = kpss[pos_inds]
-            kpss_list.append(pos_kpss)
-        # result_boxes = cv2.dnn.NMSBoxes(bboxes_list, scores_list, 0.25, 0.45, 0.5)
-        # print(result_boxes)
-        scores = np.vstack(scores_list)
-        scores_ravel = scores.ravel()
-        order = scores_ravel.argsort()[::-1]
-
-        det_scale = det_scale.numpy()  ###
-
-        bboxes = np.vstack(bboxes_list) / det_scale
-
-        kpss = np.vstack(kpss_list) / det_scale
-        pre_det = np.hstack((bboxes, scores)).astype(np.float32, copy=False)
-        pre_det = pre_det[order, :]
-
-        dets = pre_det
-        thresh = 0.4
-        x1 = dets[:, 0]
-        y1 = dets[:, 1]
-        x2 = dets[:, 2]
-        y2 = dets[:, 3]
-        scoresb = dets[:, 4]
-
-        areas = (x2 - x1 + 1) * (y2 - y1 + 1)
-        orderb = scoresb.argsort()[::-1]
-
-        keep = []
-        person_id = 0
-        people = {}
-
-        while orderb.size > 0:
-            # Add first box in list
-            i = orderb[0]
-            keep.append(i)
-
-            people[person_id] = orderb[0]
-
-            # Find overlap of remaining boxes
-            xx1 = np.maximum(x1[i], x1[orderb[1:]])
-            yy1 = np.maximum(y1[i], y1[orderb[1:]])
-            xx2 = np.minimum(x2[i], x2[orderb[1:]])
-            yy2 = np.minimum(y2[i], y2[orderb[1:]])
-
-            w = np.maximum(0.0, xx2 - xx1 + 1)
-            h = np.maximum(0.0, yy2 - yy1 + 1)
-
-            inter = w * h
-
-            ovr = inter / (areas[i] + areas[orderb[1:]] - inter)
-
-            inds0 = np.where(ovr > thresh)[0]
-            people[person_id] = np.hstack((people[person_id], orderb[inds0+1])).astype(np.int, copy=False)
-
-            # identify where there is no overlap (<thresh)
-            inds = np.where(ovr <= thresh)[0]
-            # print(len(inds))
-
-            orderb = orderb[inds+1]
-            person_id += 1
-
-        det = pre_det[keep, :]
-
-        kpss = kpss[order, :, :]
-        # print('order', kpss)
-        # kpss = kpss[keep, :, :]
-        # print('keep',kpss)
-
-        kpss_ave = []
-        for person in people:
-            # print(kpss[people[person], :, :])
-            # print('mean', np.mean(kpss[people[person], :, :], axis=0))
-            # print(kpss[people[person], :, :].shape)
-            kpss_ave.append(np.mean(kpss[people[person], :, :], axis=0).tolist())
-
-        if max_num > 0 and det.shape[0] > max_num:
-            area = (det[:, 2] - det[:, 0]) * (det[:, 3] - det[:, 1])
-            det_img_center = det_img.shape[0] // 2, det_img.shape[1] // 2
-            offsets = np.vstack([
-                (det[:, 0] + det[:, 2]) / 2 - det_img_center[1],
-                (det[:, 1] + det[:, 3]) / 2 - det_img_center[0]
-            ])
-            offset_dist_squared = np.sum(np.power(offsets, 2.0), 0)
-
-            values = area - offset_dist_squared * 2.0  # some extra weight on the centering
-            bindex = np.argsort(values)[::-1]  # some extra weight on the centering
-            bindex = bindex[0:max_num]
-
-            det = det[bindex, :]
-            if kpss is not None:
-                kpss = kpss[bindex, :]
-
-        # return kpss_ave
-
-        # delete score column
-        det = np.delete(det, 4, 1)
-
-        return kpss_ave
+        return det, kpss_5, np.array(kpss)
 
     def detect_scrdf(self, img, max_num, score, use_landmark_detection, landmark_detect_mode, landmark_score, from_points, rotation_angles:list[int]=[0]):
         if use_landmark_detection:
@@ -1324,7 +1348,6 @@ class Models():
         img_height, img_width = (img.size()[1], img.size()[2])
         im_ratio = torch.div(img_height, img_width)
 
-        # model_ratio = float(input_size[1]) / input_size[0]
         model_ratio = 1.0
         if im_ratio > model_ratio:
             new_height = input_size[1]
@@ -1487,7 +1510,7 @@ class Models():
                 scores_list.append(pos_scores)
 
         if len(bboxes_list) == 0:
-            return [], []
+            return [], [], []
 
         scores = np.vstack(scores_list)
         scores_ravel = scores.ravel()
@@ -1538,7 +1561,6 @@ class Models():
         #if max_num > 0 and det.shape[0] > max_num:
         if max_num > 0 and det.shape[0] > 1:
             area = (det[:, 2] - det[:, 0]) * (det[:, 3] - det[:, 1])
-            #det_img_center = det_img.shape[0] // 2, det_img.shape[1] // 2
             det_img_center = img_height // 2, img_width // 2
             offsets = np.vstack([
                 (det[:, 0] + det[:, 2]) / 2 - det_img_center[1],
@@ -1558,17 +1580,20 @@ class Models():
         # delete score column
         det = np.delete(det, 4, 1)
 
-        if use_landmark_detection and len(kpss) > 0:
-            for i in range(kpss.shape[0]):
-                landmark_kpss, landmark_scores = self.run_detect_landmark(img_landmark, det[i], kpss[i], landmark_detect_mode, landmark_score, from_points)
-                if len(landmark_kpss) > 0:
+        kpss_5 = kpss.copy()
+        if use_landmark_detection and len(kpss_5) > 0:
+            kpss = []
+            for i in range(kpss_5.shape[0]):
+                landmark_kpss_5, landmark_kpss, landmark_scores = self.run_detect_landmark(img_landmark, det[i], kpss_5[i], landmark_detect_mode, landmark_score, from_points)
+                kpss.append(landmark_kpss)
+                if len(landmark_kpss_5) > 0:
                     if len(landmark_scores) > 0:
                         if np.mean(landmark_scores) > np.mean(score_values[i]):
-                            kpss[i] = landmark_kpss
+                            kpss_5[i] = landmark_kpss_5
                     else:
-                        kpss[i] = landmark_kpss
+                        kpss_5[i] = landmark_kpss_5
 
-        return det, kpss
+        return det, kpss_5, np.array(kpss)
 
     def detect_yoloface(self, img, max_num, score, use_landmark_detection, landmark_detect_mode, landmark_score, from_points, rotation_angles:list[int]=[0]):
         if use_landmark_detection:
@@ -1716,7 +1741,7 @@ class Models():
                 scores_list.append(score_raw)
 
         if len(bboxes_list) == 0:
-            return [], []
+            return [], [], []
 
         scores = np.vstack(scores_list)
         scores_ravel = scores.ravel()
@@ -1767,7 +1792,6 @@ class Models():
         #if max_num > 0 and det.shape[0] > max_num:
         if max_num > 0 and det.shape[0] > 1:
             area = (det[:, 2] - det[:, 0]) * (det[:, 3] - det[:, 1])
-            #det_img_center = det_img.shape[0] // 2, det_img.shape[1] // 2
             det_img_center = img_height // 2, img_width // 2
             offsets = np.vstack([
                 (det[:, 0] + det[:, 2]) / 2 - det_img_center[1],
@@ -1787,243 +1811,20 @@ class Models():
         # delete score column
         det = np.delete(det, 4, 1)
 
-        if use_landmark_detection and len(kpss) > 0:
-            for i in range(kpss.shape[0]):
-                landmark_kpss, landmark_scores = self.run_detect_landmark(img_landmark, det[i], kpss[i], landmark_detect_mode, landmark_score, from_points)
-                if len(landmark_kpss) > 0:
+        kpss_5 = kpss.copy()
+        if use_landmark_detection and len(kpss_5) > 0:
+            kpss = []
+            for i in range(kpss_5.shape[0]):
+                landmark_kpss_5, landmark_kpss, landmark_scores = self.run_detect_landmark(img_landmark, det[i], kpss_5[i], landmark_detect_mode, landmark_score, from_points)
+                kpss.append(landmark_kpss)
+                if len(landmark_kpss_5) > 0:
                     if len(landmark_scores) > 0:
                         if np.mean(landmark_scores) > np.mean(score_values[i]):
-                            kpss[i] = landmark_kpss
+                            kpss_5[i] = landmark_kpss_5
                     else:
-                        kpss[i] = landmark_kpss
+                        kpss_5[i] = landmark_kpss_5
 
-        return det, kpss
-
-    def detect_yoloface2(self, image_in, max_num, score):
-        img = image_in.detach().clone()
-
-        height = img.size(dim=1)
-        width = img.size(dim=2)
-        length = max((height, width))
-
-        image = torch.zeros((length, length, 3), dtype=torch.uint8,
-                            device='cuda')
-        img = img.permute(1, 2, 0)
-
-        image[0:height, 0:width] = img
-        scale = length / 640.0
-        image = torch.div(image, 255.0)
-
-        t640 = v2.Resize((640, 640), antialias=False)
-        image = image.permute(2, 0, 1)
-        image = t640(image)
-
-        image = torch.unsqueeze(image, 0).contiguous()
-
-        io_binding = self.yoloface_model.io_binding()
-        io_binding.bind_input(name='images', device_type='cuda', device_id=0,
-                              element_type=np.float32, shape=image.size(),
-                              buffer_ptr=image.data_ptr())
-        io_binding.bind_output('output0', 'cuda')
-
-        # Sync and run model
-        self.syncvec.cpu()
-        self.yoloface_model.run_with_iobinding(io_binding)
-
-        net_outs = io_binding.copy_outputs_to_cpu()
-
-        outputs = np.squeeze(net_outs).T
-
-        bbox_raw, score_raw, kps_raw = np.split(outputs, [4, 5], axis=1)
-
-        bbox_list = []
-        score_list = []
-        kps_list = []
-        keep_indices = np.where(score_raw > score)[0]
-
-        if keep_indices.any():
-            bbox_raw, kps_raw, score_raw = bbox_raw[keep_indices], kps_raw[
-                keep_indices], score_raw[keep_indices]
-            for bbox in bbox_raw:
-                bbox_list.append(np.array(
-                    [(bbox[0] - bbox[2] / 2), (bbox[1] - bbox[3] / 2),
-                     (bbox[0] + bbox[2] / 2), (bbox[1] + bbox[3] / 2)]))
-            kps_raw = kps_raw * scale
-
-            for kps in kps_raw:
-                indexes = np.arange(0, len(kps), 3)
-                temp_kps = []
-                for index in indexes:
-                    temp_kps.append([kps[index], kps[index + 1]])
-                kps_list.append(np.array(temp_kps))
-            score_list = score_raw.ravel().tolist()
-
-        result_boxes = cv2.dnn.NMSBoxes(bbox_list, score_list, 0.25, 0.45, 0.5)
-
-        result = []
-        for r in result_boxes:
-            if r == max_num:
-                break
-            bbox_list = bbox_list[r]
-            result.append(kps_list[r])
-        bbox_list = bbox_list*scale
-        # print(bbox_list)
-        # print(bbox_list*scale)
-
-        # img = image_in.detach().clone()
-        # test = image_in.permute(1, 2, 0)
-        # test = test.cpu().numpy()
-        # cv2.imwrite('1.jpg', test)
-
-        # b_scale = 50
-        # bbox_list[0] = bbox_list[0] - b_scale
-        # bbox_list[1] = bbox_list[1] - b_scale
-        # bbox_list[2] = bbox_list[2] + b_scale
-        # bbox_list[3] = bbox_list[3] + b_scale
-
-        img = image_in.detach().clone()
-
-        img = img[:, int(bbox_list[1]):int(bbox_list[3]), int(bbox_list[0]):int(bbox_list[2])]
-        # print(img.size())
-
-        height = img.size(dim=1)
-        width = img.size(dim=2)
-        length = max((height, width))
-
-        image = torch.zeros((length, length, 3), dtype=torch.uint8, device='cuda')
-        img = img.permute(1,2,0)
-
-        image[0:height, 0:width] = img
-        scale = length/192
-        image = torch.div(image, 255.0)
-
-        t192 = v2.Resize((192, 192), antialias=False)
-        image = image.permute(2, 0, 1)
-        image = t192(image)
-
-        test = image_in.detach().clone().permute(1, 2, 0)
-        test = test.cpu().numpy()
-
-        input_mean = 0.0
-        input_std = 1.0
-
-        self.lmk_dim = 2
-        self.lmk_num = 106
-
-        bbox = bbox_list
-        w, h = (bbox[2] - bbox[0]), (bbox[3] - bbox[1])
-        center = (bbox[2] + bbox[0]) / 2, (bbox[3] + bbox[1]) / 2
-        rotate = 0
-        _scale = 192 / (max(w, h) * 1.5)
-        # print('param:', img.shape, bbox, center, self.input_size, _scale, rotate)
-        aimg, M = self.transform(test, center, 192, _scale, rotate)
-        input_size = tuple(aimg.shape[0:2][::-1])
-        # assert input_size==self.input_size
-        blob = cv2.dnn.blobFromImage(aimg, 1.0 / input_std, input_size, ( input_mean, input_mean, input_mean), swapRB=True)
-        pred = self.insight106_model.run(['fc1'], {'data': blob})[0][0]
-        if pred.shape[0] >= 3000:
-            pred = pred.reshape((-1, 3))
-        else:
-            pred = pred.reshape((-1, 2))
-        if self.lmk_num < pred.shape[0]:
-            pred = pred[self.lmk_num * -1:, :]
-        pred[:, 0:2] += 1
-        pred[:, 0:2] *= 96
-        if pred.shape[1] == 3:
-            pred[:, 2] *= (106)
-
-        IM = cv2.invertAffineTransform(M)
-        pred = self.trans_points2d(pred, IM)
-        # face[self.taskname] = pred
-        # if self.require_pose:
-        #     P = transform.estimate_affine_matrix_3d23d(self.mean_lmk, pred)
-        #     s, R, t = transform.P2sRt(P)
-        #     rx, ry, rz = transform.matrix2angle(R)
-        #     pose = np.array([rx, ry, rz], dtype=np.float32)
-        #     face['pose'] = pose  # pitch, yaw, roll
-        # print(pred.shape)
-        # print(pred)
-
-        for point in pred:
-            test[int(point[1])] [int(point[0])] [0] = 255
-            test[int(point[1])] [int(point[0])] [1] = 255
-            test[int(point[1])] [int(point[0])] [2] = 255
-        cv2.imwrite('2.jpg', test)
-
-        predd = []
-        predd.append(pred[38])
-        predd.append(pred[88])
-        # predd.append(pred[86])
-        # predd.append(pred[52])
-        # predd.append(pred[61])
-
-        predd.append(kps_list[0][2])
-        predd.append(kps_list[0][3])
-        predd.append(kps_list[0][4])
-
-        # for point in predd:
-        #     test[int(point[1])] [int(point[0])] [0] = 255
-        #     test[int(point[1])] [int(point[0])] [1] = 255
-        #     test[int(point[1])] [int(point[0])] [2] = 255
-        # cv2.imwrite('2.jpg', test)
-        preddd=[]
-        preddd.append(predd)
-        return np.array(preddd)
-    def transform(self, data, center, output_size, scale, rotation):
-        scale_ratio = scale
-        rot = float(rotation) * np.pi / 180.0
-        # translation = (output_size/2-center[0]*scale_ratio, output_size/2-center[1]*scale_ratio)
-        t1 = trans.SimilarityTransform(scale=scale_ratio)
-        cx = center[0] * scale_ratio
-        cy = center[1] * scale_ratio
-        t2 = trans.SimilarityTransform(translation=(-1 * cx, -1 * cy))
-        t3 = trans.SimilarityTransform(rotation=rot)
-        t4 = trans.SimilarityTransform(translation=(output_size / 2,
-                                                    output_size / 2))
-        t = t1 + t2 + t3 + t4
-        M = t.params[0:2]
-        cropped = cv2.warpAffine(data,
-                                 M, (output_size, output_size),
-                                 borderValue=0.0)
-        return cropped, M
-
-    def trans_points2d(self, pts, M):
-        new_pts = np.zeros(shape=pts.shape, dtype=np.float32)
-        for i in range(pts.shape[0]):
-            pt = pts[i]
-            new_pt = np.array([pt[0], pt[1], 1.], dtype=np.float32)
-            new_pt = np.dot(M, new_pt)
-            # print('new_pt', new_pt.shape, new_pt)
-            new_pts[i] = new_pt[0:2]
-
-        return new_pts
-
-        # image = torch.unsqueeze(image, 0).contiguous()
-        #
-        # io_binding = self.insight106_model.io_binding()
-        # io_binding.bind_input(name='data', device_type='cuda', device_id=0, element_type=np.float32,  shape=image.size(), buffer_ptr=image.data_ptr())
-        # io_binding.bind_output('fc1', 'cuda')
-        #
-        # # Sync and run model
-        # self.syncvec.cpu()
-        # self.insight106_model.run_with_iobinding(io_binding)
-        #
-        # net_outs = io_binding.copy_outputs_to_cpu()
-        # print(net_outs)
-        # net_outs[0][0] = net_outs[0][0]+1.
-        # net_outs[0][0] = net_outs[0][0]/2.
-        # net_outs[0][0] = net_outs[0][0]*96
-        #
-        # # net_outs[0] = net_outs[0]*scale
-        # # print(net_outs)
-        # test=test*255.0
-        # for i in range(0, len(net_outs[0][0]), 2):
-        #     test[int(net_outs[0][0][i+1])] [int(net_outs[0][0][i])] [0] = 255
-        #     test[int(net_outs[0][0][i+1])] [int(net_outs[0][0][i])] [1] = 255
-        #     test[int(net_outs[0][0][i+1])] [int(net_outs[0][0][i])] [2] = 255
-        # cv2.imwrite('2.jpg', test)
-        #
-        # return np.array(result)
+        return det, kpss_5, np.array(kpss)
 
     def detect_yunet(self, img, max_num, score, use_landmark_detection, landmark_detect_mode, landmark_score, from_points, rotation_angles:list[int]=[0]):
         if use_landmark_detection:
@@ -2034,7 +1835,6 @@ class Models():
         img_height, img_width = (img.size()[1], img.size()[2])
         im_ratio = torch.div(img_height, img_width)
 
-        # model_ratio = float(input_size[1]) / input_size[0]
         model_ratio = 1.0
         if im_ratio > model_ratio:
             new_height = input_size[1]
@@ -2160,7 +1960,6 @@ class Models():
                         pos_bboxes = np.hstack((points1, points2))
 
                 # kpss
-                # for nk in range(5):
                 kpss = np.concatenate(
                     [((kps_pred[:, [2 * i, 2 * i + 1]] * stride) + anchor_centers)
                      for i in range(5)],
@@ -2189,7 +1988,7 @@ class Models():
                 scores_list.append(pos_scores)
 
         if len(bboxes_list) == 0:
-            return [], []
+            return [], [], []
 
         scores = np.vstack(scores_list)
         scores_ravel = scores.ravel()
@@ -2240,7 +2039,6 @@ class Models():
         #if max_num > 0 and det.shape[0] > max_num:
         if max_num > 0 and det.shape[0] > 1:
             area = (det[:, 2] - det[:, 0]) * (det[:, 3] - det[:, 1])
-            #det_img_center = det_img.shape[0] // 2, det_img.shape[1] // 2
             det_img_center = img_height // 2, img_width // 2
             offsets = np.vstack([
                 (det[:, 0] + det[:, 2]) / 2 - det_img_center[1],
@@ -2260,17 +2058,20 @@ class Models():
         # delete score column
         det = np.delete(det, 4, 1)
 
-        if use_landmark_detection and len(kpss) > 0:
-            for i in range(kpss.shape[0]):
-                landmark_kpss, landmark_scores = self.run_detect_landmark(img_landmark, det[i], kpss[i], landmark_detect_mode, landmark_score, from_points)
-                if len(landmark_kpss) > 0:
+        kpss_5 = kpss.copy()
+        if use_landmark_detection and len(kpss_5) > 0:
+            kpss = []
+            for i in range(kpss_5.shape[0]):
+                landmark_kpss_5, landmark_kpss, landmark_scores = self.run_detect_landmark(img_landmark, det[i], kpss_5[i], landmark_detect_mode, landmark_score, from_points)
+                kpss.append(landmark_kpss)
+                if len(landmark_kpss_5) > 0:
                     if len(landmark_scores) > 0:
                         if np.mean(landmark_scores) > np.mean(score_values[i]):
-                            kpss[i] = landmark_kpss
+                            kpss_5[i] = landmark_kpss_5
                     else:
-                        kpss[i] = landmark_kpss
+                        kpss_5[i] = landmark_kpss_5
 
-        return det, kpss
+        return det, kpss_5, np.array(kpss)
 
     def detect_face_landmark_5(self, img, bbox, det_kpss, from_points=False):
         if from_points == False:
@@ -2338,23 +2139,16 @@ class Models():
             landmarks = faceutil.trans_points2d(landmarks, IM)
             scores = np.array([scores])
 
-            #faceutil.test_bbox_landmarks(img, bbox, landmarks)
-            #print(scores)
+            return landmarks, landmarks, scores
 
-            return landmarks, scores
+        return [], [], []
 
-        return [], []
-
-    def detect_face_landmark_68(self, img, bbox, det_kpss, convert68_5=True, from_points=False):
+    def detect_face_landmark_68(self, img, bbox, det_kpss, from_points=False):
         if from_points == False:
             crop_image, affine_matrix = faceutil.warp_face_by_bounding_box_for_landmark_68(img, bbox, (256, 256))
         else:
             crop_image, affine_matrix = faceutil.warp_face_by_face_landmark_5(img, det_kpss, 256, mode='arcface128', interpolation=v2.InterpolationMode.BILINEAR)
-        '''
-        cv2.imshow('image', crop_image.permute(1, 2, 0).to('cpu').numpy())
-        cv2.waitKey(0)
-        cv2.destroyAllWindows()
-        '''
+
         crop_image = crop_image.to(dtype=torch.float32)
         crop_image = torch.div(crop_image, 255.0)
         crop_image = torch.unsqueeze(crop_image, 0).contiguous()
@@ -2380,28 +2174,20 @@ class Models():
         face_landmark_68_score = np.amax(face_heatmap, axis = (2, 3))
         face_landmark_68_score = face_landmark_68_score.reshape(-1, 1)
 
-        if convert68_5:
-            face_landmark_68, face_landmark_68_score = faceutil.convert_face_landmark_68_to_5(face_landmark_68, face_landmark_68_score)
+        face_landmark_68_5, face_landmark_68_score = faceutil.convert_face_landmark_68_to_5(face_landmark_68, face_landmark_68_score)
 
-        #faceutil.test_bbox_landmarks(img, bbox, face_landmark_68)
+        return face_landmark_68_5, face_landmark_68, face_landmark_68_score
 
-        return face_landmark_68, face_landmark_68_score
-
-    def detect_face_landmark_3d68(self, img, bbox, det_kpss, convert68_5=True, from_points=False):
+    def detect_face_landmark_3d68(self, img, bbox, det_kpss, from_points=False):
         if from_points == False:
             w, h = (bbox[2] - bbox[0]), (bbox[3] - bbox[1])
             center = (bbox[2] + bbox[0]) / 2, (bbox[3] + bbox[1]) / 2
             rotate = 0
             _scale = 192  / (max(w, h)*1.5)
-            #print('param:', img.size(), bbox, center, (192, 192), _scale, rotate)
             aimg, M = faceutil.transform(img, center, 192, _scale, rotate)
         else:
             aimg, M = faceutil.warp_face_by_face_landmark_5(img, det_kpss, image_size=192, mode='arcface128', interpolation=v2.InterpolationMode.BILINEAR)
-        '''
-        cv2.imshow('image', aimg.permute(1.2.0).to('cpu').numpy())
-        cv2.waitKey(0)
-        cv2.destroyAllWindows()
-        '''
+
         aimg = torch.unsqueeze(aimg, 0).contiguous()
         aimg = aimg.to(dtype=torch.float32)
         aimg = self.normalize(aimg)
@@ -2426,7 +2212,6 @@ class Models():
         if pred.shape[1] == 3:
             pred[:, 2] *= (192 // 2)
 
-        #IM = cv2.invertAffineTransform(M)
         IM = faceutil.invertAffineTransform(M)
         pred = faceutil.trans_points3d(pred, IM)
 
@@ -2441,27 +2226,20 @@ class Models():
         # convert from 3d68 to 2d68 keypoints
         landmark2d68 = np.array(pred[:, [0, 1]])
 
-        if convert68_5:
-            # convert from 68 to 5 keypoints
-            landmark2d68, _ = faceutil.convert_face_landmark_68_to_5(landmark2d68, [])
+        # convert from 68 to 5 keypoints
+        landmark2d68_5, _ = faceutil.convert_face_landmark_68_to_5(landmark2d68, [])
 
-        #faceutil.test_bbox_landmarks(img, bbox, landmark2d68)
+        return landmark2d68_5, landmark2d68, []
 
-        return landmark2d68, []
-
-    def detect_face_landmark_98(self, img, bbox, det_kpss, convert98_5=True, from_points=False):
+    def detect_face_landmark_98(self, img, bbox, det_kpss, from_points=False):
         if from_points == False:
             crop_image, detail = faceutil.warp_face_by_bounding_box_for_landmark_98(img, bbox, (256, 256))
         else:
             crop_image, M = faceutil.warp_face_by_face_landmark_5(img, det_kpss, image_size=256, mode='arcface128', interpolation=v2.InterpolationMode.BILINEAR)
-            #crop_image2 = crop_image.clone()
             h, w = (crop_image.size(dim=1), crop_image.size(dim=2))
-        '''
-        cv2.imshow('image', crop_image.permute(1, 2, 0).to('cpu').numpy())
-        cv2.waitKey(0)
-        cv2.destroyAllWindows()
-        '''
+
         landmark = []
+        landmark_5 = []
         landmark_score = []
         if crop_image is not None:
             crop_image = crop_image.to(dtype=torch.float32)
@@ -2483,31 +2261,22 @@ class Models():
                     landmark_score = one_face_landmarks[:, [2]].reshape(-1)
                     landmark = one_face_landmarks[:, [0, 1]].reshape(-1,2)
 
-                    ##recorver, and grouped as [98,2]
+                    ##recover, and grouped as [98,2]
                     if from_points == False:
                         landmark[:, 0] = landmark[:, 0] * detail[1] + detail[3] - detail[4]
                         landmark[:, 1] = landmark[:, 1] * detail[0] + detail[2] - detail[4]
                     else:
                         landmark[:, 0] = landmark[:, 0] * w
                         landmark[:, 1] = landmark[:, 1] * h
-                        #lmk = landmark.copy()
-                        #lmk_score = landmark_score.copy()
 
-                        #IM = cv2.invertAffineTransform(M)
                         IM = faceutil.invertAffineTransform(M)
                         landmark = faceutil.trans_points2d(landmark, IM)
 
-                    if convert98_5:
-                        landmark, landmark_score = faceutil.convert_face_landmark_98_to_5(landmark, landmark_score)
-                        #lmk, lmk_score = faceutil.convert_face_landmark_98_to_5(lmk, lmk_score)
+                    landmark_5, landmark_score = faceutil.convert_face_landmark_98_to_5(landmark, landmark_score)
 
-                    #faceutil.test_bbox_landmarks(crop_image2, [], lmk)
-                    #faceutil.test_bbox_landmarks(img, bbox, landmark)
-                    #faceutil.test_bbox_landmarks(img, bbox, det_kpss)
+        return landmark_5, landmark, landmark_score
 
-        return landmark, landmark_score
-
-    def detect_face_landmark_106(self, img, bbox, det_kpss, convert106_5=True, from_points=False):
+    def detect_face_landmark_106(self, img, bbox, det_kpss, from_points=False):
         if from_points == False:
             w, h = (bbox[2] - bbox[0]), (bbox[3] - bbox[1])
             center = (bbox[2] + bbox[0]) / 2, (bbox[3] + bbox[1]) / 2
@@ -2517,11 +2286,7 @@ class Models():
             aimg, M = faceutil.transform(img, center, 192, _scale, rotate)
         else:
             aimg, M = faceutil.warp_face_by_face_landmark_5(img, det_kpss, image_size=192, mode='arcface128', interpolation=v2.InterpolationMode.BILINEAR)
-        '''
-        cv2.imshow('image', aimg.permute(1.2.0).to('cpu').numpy())
-        cv2.waitKey(0)
-        cv2.destroyAllWindows()
-        '''
+
         aimg = torch.unsqueeze(aimg, 0).contiguous()
         aimg = aimg.to(dtype=torch.float32)
         aimg = self.normalize(aimg)
@@ -2548,20 +2313,61 @@ class Models():
         if pred.shape[1] == 3:
             pred[:, 2] *= (192 // 2)
 
-        #IM = cv2.invertAffineTransform(M)
         IM = faceutil.invertAffineTransform(M)
         pred = faceutil.trans_points(pred, IM)
 
+        pred_5 = []
         if pred is not None:
-            if convert106_5:
-                # convert from 106 to 5 keypoints
-                pred = faceutil.convert_face_landmark_106_to_5(pred)
+            # convert from 106 to 5 keypoints
+            pred_5 = faceutil.convert_face_landmark_106_to_5(pred)
 
-        #faceutil.test_bbox_landmarks(img, bbox, pred)
+        return pred_5, pred, []
 
-        return pred, []
+    def detect_face_landmark_203(self, img, bbox, det_kpss, from_points=False):
+        if from_points == False:
+            w, h = (bbox[2] - bbox[0]), (bbox[3] - bbox[1])
+            center = (bbox[2] + bbox[0]) / 2, (bbox[3] + bbox[1]) / 2
+            rotate = 0
+            _scale = 224  / (max(w, h)*1.5)
 
-    def detect_face_landmark_478(self, img, bbox, det_kpss, convert478_5=True, from_points=False):
+            aimg, M = faceutil.transform(img, center, 224, _scale, rotate)
+        else:
+            if det_kpss.shape[0] == 5:
+                aimg, M = faceutil.warp_face_by_face_landmark_5(img, det_kpss, image_size=224, mode='arcface128', interpolation=v2.InterpolationMode.BILINEAR)
+            else:
+                aimg, M, IM = faceutil.warp_face_by_face_landmark_x(img, det_kpss, dsize=224, scale=1.5, vy_ratio=-0.1, interpolation=v2.InterpolationMode.BILINEAR)
+
+        aimg = torch.unsqueeze(aimg, 0).contiguous()
+        aimg = aimg.to(dtype=torch.float32)
+        aimg = torch.div(aimg, 255.0)
+        io_binding = self.face_landmark_203_model.io_binding()
+        io_binding.bind_input(name='input', device_type='cuda', device_id=0, element_type=np.float32,  shape=aimg.size(), buffer_ptr=aimg.data_ptr())
+
+        io_binding.bind_output('output', 'cuda')
+        io_binding.bind_output('853', 'cuda')
+        io_binding.bind_output('856', 'cuda')
+
+        # Sync and run model
+        syncvec = self.syncvec.cpu()
+        self.face_landmark_203_model.run_with_iobinding(io_binding)
+        out_lst = io_binding.copy_outputs_to_cpu()
+        out_pts = out_lst[2]
+
+        out_pts = out_pts.reshape((-1, 2)) * 224.0
+
+        if det_kpss.shape[0] == 5:
+            IM = faceutil.invertAffineTransform(M)
+
+        out_pts = faceutil.trans_points(out_pts, IM)
+
+        out_pts_5 = []
+        if out_pts is not None:
+            # convert from 203 to 5 keypoints
+            out_pts_5 = faceutil.convert_face_landmark_203_to_5(out_pts)
+
+        return out_pts_5, out_pts, []
+
+    def detect_face_landmark_478(self, img, bbox, det_kpss, from_points=False):
         if from_points == False:
             w, h = (bbox[2] - bbox[0]), (bbox[3] - bbox[1])
             center = (bbox[2] + bbox[0]) / 2, (bbox[3] + bbox[1]) / 2
@@ -2571,12 +2377,7 @@ class Models():
             aimg, M = faceutil.transform(img, center, 256, _scale, rotate)
         else:
             aimg, M = faceutil.warp_face_by_face_landmark_5(img, det_kpss, 256, mode='arcfacemap', interpolation=v2.InterpolationMode.BILINEAR)
-            #aimg2 = aimg.clone()
-        '''
-        cv2.imshow('image', aimg.permute(1,2,0).to('cpu').numpy())
-        cv2.waitKey(0)
-        cv2.destroyAllWindows()
-        '''
+
         aimg = torch.unsqueeze(aimg, 0).contiguous()
         aimg = aimg.to(dtype=torch.float32)
         aimg = torch.div(aimg, 255.0)
@@ -2594,12 +2395,11 @@ class Models():
         landmarks = landmarks.reshape( (1,478,3))
 
         landmark = []
+        landmark_5 = []
         landmark_score = []
         if len(landmarks) > 0:
             for one_face_landmarks in landmarks:
-                #lmk = one_face_landmarks.copy()
                 landmark = one_face_landmarks
-                #IM = cv2.invertAffineTransform(M)
                 IM = faceutil.invertAffineTransform(M)
                 landmark = faceutil.trans_points3d(landmark, IM)
                 '''
@@ -2609,7 +2409,6 @@ class Models():
                 pose = np.array( [rx, ry, rz], dtype=np.float32 ) #pitch, yaw, roll
                 '''
                 landmark = landmark[:, [0, 1]].reshape(-1,2)
-                #lmk = lmk[:, [0, 1]].reshape(-1,2)
 
                 #get scores
                 landmark_for_score = landmark[self.LandmarksSubsetIdxs]
@@ -2627,17 +2426,11 @@ class Models():
                 self.face_blendshapes_model.run_with_iobinding(io_binding_bs)
                 landmark_score = io_binding_bs.copy_outputs_to_cpu()[0]
 
-                if convert478_5:
-                    # convert from 478 to 5 keypoints
-                    landmark = faceutil.convert_face_landmark_478_to_5(landmark)
-                    #lmk = faceutil.convert_face_landmark_478_to_5(lmk)
-
-                #faceutil.test_bbox_landmarks(aimg2, [], lmk)
-                #faceutil.test_bbox_landmarks(img, bbox, landmark)
-                #faceutil.test_bbox_landmarks(img, bbox, det_kpss)
+                # convert from 478 to 5 keypoints
+                landmark_5 = faceutil.convert_face_landmark_478_to_5(landmark)
 
         #return landmark, landmark_score
-        return landmark, []
+        return landmark_5, landmark, []
 
     def recognize(self, recognition_model, img, face_kps, similarity_type):
         if similarity_type == 'Optimal':
@@ -2677,8 +2470,6 @@ class Models():
             # Converti a float32 e normalizza
             img = torch.div(img.float(), 127.5)
             img = torch.sub(img, 1)
-            # img è già in RGB quindi nessuna conversione.
-            #img = img[[2, 1, 0], :, :] # Inverte i canali da BGR a RGB (assumendo che l'input sia BGR)
 
         # Prepare data and find model parameters
         img = torch.unsqueeze(img, 0).contiguous()
@@ -2724,15 +2515,11 @@ class Models():
                         for cy, cx in product(dense_cy, dense_cx):
                             self.anchors += [cx, cy, s_kx, s_ky]
 
-        # image = cv2.cvtColor(np.asarray(image), cv2.COLOR_RGB2BGR)
         image = image.permute(1,2,0)
 
-        # image = image - [104, 117, 123]
         mean = torch.tensor([104, 117, 123], dtype=torch.float32, device='cuda')
         image = torch.sub(image, mean)
 
-        # image = image.transpose(2, 0, 1)
-        # image = np.float32(image[np.newaxis,:,:,:])
         image = image.permute(2,0,1)
         image = torch.reshape(image, (1, 3, 512, 512)).contiguous()
 
@@ -2740,7 +2527,6 @@ class Models():
         tmp = [width, height, width, height, width, height, width, height, width, height]
         scale1 = torch.tensor(tmp, dtype=torch.float32, device='cuda')
 
-        # ort_inputs = {"input": image}
         conf = torch.empty((1,10752,2), dtype=torch.float32, device='cuda').contiguous()
         landmarks = torch.empty((1,10752,10), dtype=torch.float32, device='cuda').contiguous()
 
@@ -2749,26 +2535,19 @@ class Models():
         io_binding.bind_output(name='conf', device_type='cuda', device_id=0, element_type=np.float32, shape=(1,10752,2), buffer_ptr=conf.data_ptr())
         io_binding.bind_output(name='landmarks', device_type='cuda', device_id=0, element_type=np.float32, shape=(1,10752,10), buffer_ptr=landmarks.data_ptr())
 
-        # _, conf, landmarks = self.resnet_model.run(None, ort_inputs)
         torch.cuda.synchronize('cuda')
         self.resnet50_model.run_with_iobinding(io_binding)
 
-        # conf = torch.from_numpy(conf)
-        # scores = conf.squeeze(0).numpy()[:, 1]
         scores = torch.squeeze(conf)[:, 1]
-
-        # landmarks = torch.from_numpy(landmarks)
-        # landmarks = landmarks.to('cuda')
 
         priors = torch.tensor(self.anchors).view(-1, 4)
         priors = priors.to('cuda')
 
-        # pre = landmarks.squeeze(0)
         pre = torch.squeeze(landmarks, 0)
 
         tmp = (priors[:, :2] + pre[:, :2] * 0.1 * priors[:, 2:], priors[:, :2] + pre[:, 2:4] * 0.1 * priors[:, 2:], priors[:, :2] + pre[:, 4:6] * 0.1 * priors[:, 2:], priors[:, :2] + pre[:, 6:8] * 0.1 * priors[:, 2:], priors[:, :2] + pre[:, 8:10] * 0.1 * priors[:, 2:])
         landmarks = torch.cat(tmp, dim=1)
-        # landmarks = landmarks * scale1
+
         landmarks = torch.mul(landmarks, scale1)
 
         landmarks = landmarks.cpu().numpy()
@@ -2785,3 +2564,377 @@ class Models():
         landmarks = landmarks[order][0]
 
         return np.array([[landmarks[i], landmarks[i + 1]] for i in range(0,10,2)])
+
+    # Face Editor
+    #def get_kp_info(self, x: torch.Tensor, **kwargs) -> dict:
+    def lp_motion_extractor(self, img, face_editor_type='Human-Face', **kwargs) -> dict:
+        kp_info = {}
+        if self.provider_name == "TensorRT-Engine":
+            if face_editor_type == 'Human-Face':
+                if not self.lp_motion_extractor_model:
+                    if not os.path.exists("./models/liveportrait_onnx/motion_extractor.trt"):
+                        onnx2trt(onnx_model_path="./models/liveportrait_onnx/motion_extractor.onnx",
+                                 trt_model_path=None, precision="fp32",
+                                 verbose=False
+                                )
+                    self.lp_motion_extractor_model = TensorRTPredictor(model_path="./models/liveportrait_onnx/motion_extractor.trt")
+
+            motion_extractor_model = self.lp_motion_extractor_model
+
+            # prepare_source
+            I_s = torch.div(img.type(torch.float32), 255.)
+            I_s = torch.clamp(I_s, 0, 1)  # clamp to 0~1
+            I_s = torch.unsqueeze(I_s, 0).contiguous()
+
+            nvtx.range_push("forward")
+
+            feed_dict = {}
+            feed_dict["img"] = I_s
+            preds_dict = motion_extractor_model.predict_async(feed_dict, torch.cuda.current_stream().cuda_stream)
+            #preds_dict = motion_extractor_model.predict(feed_dict)
+            torch.cuda.synchronize()
+            kp_info = {
+                'pitch': preds_dict["pitch"],
+                'yaw': preds_dict["yaw"],
+                'roll': preds_dict["roll"],
+                't': preds_dict["t"],
+                'exp': preds_dict["exp"],
+                'scale': preds_dict["scale"],
+                'kp': preds_dict["kp"]
+            }
+
+            nvtx.range_pop()
+
+        else:
+            if face_editor_type == 'Human-Face':
+                if not self.lp_motion_extractor_model:
+                    self.lp_motion_extractor_model = onnxruntime.InferenceSession("./models/liveportrait_onnx/motion_extractor.onnx", providers=self.providers)
+
+                motion_extractor_model = self.lp_motion_extractor_model
+
+            # prepare_source
+            I_s = torch.div(img.type(torch.float32), 255.)
+            I_s = torch.clamp(I_s, 0, 1)  # clamp to 0~1
+            I_s = torch.unsqueeze(I_s, 0).contiguous()
+
+            pitch = torch.empty((1,66), dtype=torch.float32, device='cuda').contiguous()
+            yaw = torch.empty((1,66), dtype=torch.float32, device='cuda').contiguous()
+            roll = torch.empty((1,66), dtype=torch.float32, device='cuda').contiguous()
+            t = torch.empty((1,3), dtype=torch.float32, device='cuda').contiguous()
+            exp = torch.empty((1,63), dtype=torch.float32, device='cuda').contiguous()
+            scale = torch.empty((1,1), dtype=torch.float32, device='cuda').contiguous()
+            kp = torch.empty((1,63), dtype=torch.float32, device='cuda').contiguous()
+
+            io_binding = motion_extractor_model.io_binding()
+            io_binding.bind_input(name='img', device_type='cuda', device_id=0, element_type=np.float32, shape=I_s.size(), buffer_ptr=I_s.data_ptr())
+            io_binding.bind_output(name='pitch', device_type='cuda', device_id=0, element_type=np.float32, shape=pitch.size(), buffer_ptr=pitch.data_ptr())
+            io_binding.bind_output(name='yaw', device_type='cuda', device_id=0, element_type=np.float32, shape=yaw.size(), buffer_ptr=yaw.data_ptr())
+            io_binding.bind_output(name='roll', device_type='cuda', device_id=0, element_type=np.float32, shape=roll.size(), buffer_ptr=roll.data_ptr())
+            io_binding.bind_output(name='t', device_type='cuda', device_id=0, element_type=np.float32, shape=t.size(), buffer_ptr=t.data_ptr())
+            io_binding.bind_output(name='exp', device_type='cuda', device_id=0, element_type=np.float32, shape=exp.size(), buffer_ptr=exp.data_ptr())
+            io_binding.bind_output(name='scale', device_type='cuda', device_id=0, element_type=np.float32, shape=scale.size(), buffer_ptr=scale.data_ptr())
+            io_binding.bind_output(name='kp', device_type='cuda', device_id=0, element_type=np.float32, shape=kp.size(), buffer_ptr=kp.data_ptr())
+
+            torch.cuda.synchronize('cuda')
+            motion_extractor_model.run_with_iobinding(io_binding)
+
+            kp_info = {
+                'pitch': pitch,
+                'yaw': yaw,
+                'roll': roll,
+                't': t,
+                'exp': exp,
+                'scale': scale,
+                'kp': kp
+            }
+
+        flag_refine_info: bool = kwargs.get('flag_refine_info', True)
+        if flag_refine_info:
+            bs = kp_info['kp'].shape[0]
+            kp_info['pitch'] = faceutil.headpose_pred_to_degree(kp_info['pitch'])[:, None]  # Bx1
+            kp_info['yaw'] = faceutil.headpose_pred_to_degree(kp_info['yaw'])[:, None]  # Bx1
+            kp_info['roll'] = faceutil.headpose_pred_to_degree(kp_info['roll'])[:, None]  # Bx1
+            kp_info['kp'] = kp_info['kp'].reshape(bs, -1, 3)  # BxNx3
+            kp_info['exp'] = kp_info['exp'].reshape(bs, -1, 3)  # BxNx3
+
+        return kp_info
+
+    def lp_appearance_feature_extractor(self, img, face_editor_type='Human-Face'):
+        if self.provider_name == "TensorRT-Engine":
+            if face_editor_type == 'Human-Face':
+                if not self.lp_appearance_feature_extractor_model:
+                    if not os.path.exists("./models/liveportrait_onnx/appearance_feature_extractor.trt"):
+                        onnx2trt(onnx_model_path="./models/liveportrait_onnx/appearance_feature_extractor.onnx",
+                                 trt_model_path=None, precision="fp16",
+                                 verbose=False
+                                )
+                    self.lp_appearance_feature_extractor_model = TensorRTPredictor(model_path="./models/liveportrait_onnx/appearance_feature_extractor.trt")
+
+            appearance_feature_extractor_model = self.lp_appearance_feature_extractor_model
+
+            # prepare_source
+            I_s = torch.div(img.type(torch.float32), 255.)
+            I_s = torch.clamp(I_s, 0, 1)  # clamp to 0~1
+            I_s = torch.unsqueeze(I_s, 0).contiguous()
+
+            nvtx.range_push("forward")
+
+            feed_dict = {}
+            feed_dict["img"] = I_s
+            preds_dict = appearance_feature_extractor_model.predict_async(feed_dict, torch.cuda.current_stream().cuda_stream)
+            #preds_dict = appearance_feature_extractor_model.predict(feed_dict)
+            torch.cuda.synchronize()
+            output = preds_dict["output"]
+
+            nvtx.range_pop()
+
+        else:
+            if face_editor_type == 'Human-Face':
+                if not self.lp_appearance_feature_extractor_model:
+                    self.lp_appearance_feature_extractor_model = onnxruntime.InferenceSession("./models/liveportrait_onnx/appearance_feature_extractor.onnx", providers=self.providers)
+
+                appearance_feature_extractor_model = self.lp_appearance_feature_extractor_model
+
+            # prepare_source
+            I_s = torch.div(img.type(torch.float32), 255.)
+            I_s = torch.clamp(I_s, 0, 1)  # clamp to 0~1
+            I_s = torch.unsqueeze(I_s, 0).contiguous()
+
+            output = torch.empty((1,32,16,64,64), dtype=torch.float32, device='cuda').contiguous()
+
+            io_binding = appearance_feature_extractor_model.io_binding()
+            io_binding.bind_input(name='img', device_type='cuda', device_id=0, element_type=np.float32, shape=I_s.size(), buffer_ptr=I_s.data_ptr())
+            io_binding.bind_output(name='output', device_type='cuda', device_id=0, element_type=np.float32, shape=output.size(), buffer_ptr=output.data_ptr())
+
+            torch.cuda.synchronize('cuda')
+            appearance_feature_extractor_model.run_with_iobinding(io_binding)
+
+        return output
+
+    def lp_retarget_eye(self, kp_source: torch.Tensor, eye_close_ratio: torch.Tensor, face_editor_type='Human-Face') -> torch.Tensor:
+        """
+        kp_source: BxNx3
+        eye_close_ratio: Bx3
+        Return: Bx(3*num_kp)
+        """
+        if self.provider_name == "TensorRT-Engine":
+            if face_editor_type == 'Human-Face':
+                if not self.lp_stitching_eye_model:
+                    if not os.path.exists("./models/liveportrait_onnx/stitching_eye.trt"):
+                        onnx2trt(onnx_model_path="./models/liveportrait_onnx/stitching_eye.onnx",
+                                 trt_model_path=None, precision="fp16",
+                                 verbose=False
+                                )
+                    self.lp_stitching_eye_model = TensorRTPredictor(model_path="./models/liveportrait_onnx/stitching_eye.trt")
+
+            stitching_eye_model = self.lp_stitching_eye_model
+
+            feat_eye = faceutil.concat_feat(kp_source, eye_close_ratio).contiguous()
+
+            nvtx.range_push("forward")
+
+            feed_dict = {}
+            feed_dict["input"] = feat_eye
+            preds_dict = stitching_eye_model.predict_async(feed_dict, torch.cuda.current_stream().cuda_stream)
+            #preds_dict = stitching_eye_model.predict(feed_dict)
+            torch.cuda.synchronize()
+            delta = preds_dict["output"]
+
+            nvtx.range_pop()
+
+        else:
+            if face_editor_type == 'Human-Face':
+                if not self.lp_stitching_eye_model:
+                    self.lp_stitching_eye_model = onnxruntime.InferenceSession("./models/liveportrait_onnx/stitching_eye.onnx", providers=self.providers)
+
+                stitching_eye_model = self.lp_stitching_eye_model
+
+            feat_eye = faceutil.concat_feat(kp_source, eye_close_ratio).contiguous()
+            delta = torch.empty((1,63), dtype=torch.float32, device='cuda').contiguous()
+
+            io_binding = stitching_eye_model.io_binding()
+            io_binding.bind_input(name='input', device_type='cuda', device_id=0, element_type=np.float32, shape=feat_eye.size(), buffer_ptr=feat_eye.data_ptr())
+            io_binding.bind_output(name='output', device_type='cuda', device_id=0, element_type=np.float32, shape=delta.size(), buffer_ptr=delta.data_ptr())
+
+            torch.cuda.synchronize('cuda')
+            stitching_eye_model.run_with_iobinding(io_binding)
+
+        return delta.reshape(-1, kp_source.shape[1], 3)
+
+    def lp_retarget_lip(self, kp_source: torch.Tensor, lip_close_ratio: torch.Tensor, face_editor_type='Human-Face') -> torch.Tensor:
+        """
+        kp_source: BxNx3
+        lip_close_ratio: Bx2
+        Return: Bx(3*num_kp)
+        """
+        if self.provider_name == "TensorRT-Engine":
+            if face_editor_type == 'Human-Face':
+                if not self.lp_stitching_lip_model:
+                    if not os.path.exists("./models/liveportrait_onnx/stitching_lip.trt"):
+                        onnx2trt(onnx_model_path="./models/liveportrait_onnx/stitching_lip.onnx",
+                                 trt_model_path=None, precision="fp16",
+                                 verbose=False
+                                )
+                    self.lp_stitching_lip_model = TensorRTPredictor(model_path="./models/liveportrait_onnx/stitching_lip.trt")
+
+            stitching_lip_model = self.lp_stitching_lip_model
+
+            feat_lip = faceutil.concat_feat(kp_source, lip_close_ratio).contiguous()
+
+            nvtx.range_push("forward")
+
+            feed_dict = {}
+            feed_dict["input"] = feat_lip
+            preds_dict = stitching_lip_model.predict_async(feed_dict, torch.cuda.current_stream().cuda_stream)
+            #preds_dict = stitching_lip_model.predict(feed_dict)
+            torch.cuda.synchronize()
+            delta = preds_dict["output"]
+
+            nvtx.range_pop()
+
+        else:
+            if face_editor_type == 'Human-Face':
+                if not self.lp_stitching_lip_model:
+                    self.lp_stitching_lip_model = onnxruntime.InferenceSession("./models/liveportrait_onnx/stitching_lip.onnx", providers=self.providers)
+
+                stitching_lip_model = self.lp_stitching_lip_model
+
+            feat_lip = faceutil.concat_feat(kp_source, lip_close_ratio).contiguous()
+            delta = torch.empty((1,63), dtype=torch.float32, device='cuda').contiguous()
+
+            io_binding = stitching_lip_model.io_binding()
+            io_binding.bind_input(name='input', device_type='cuda', device_id=0, element_type=np.float32, shape=feat_lip.size(), buffer_ptr=feat_lip.data_ptr())
+            io_binding.bind_output(name='output', device_type='cuda', device_id=0, element_type=np.float32, shape=delta.size(), buffer_ptr=delta.data_ptr())
+
+            torch.cuda.synchronize('cuda')
+            stitching_lip_model.run_with_iobinding(io_binding)
+
+        return delta.reshape(-1, kp_source.shape[1], 3)
+
+    def lp_stitch(self, kp_source: torch.Tensor, kp_driving: torch.Tensor, face_editor_type='Human-Face') -> torch.Tensor:
+        """
+        kp_source: BxNx3
+        kp_driving: BxNx3
+        Return: Bx(3*num_kp+2)
+        """
+        if self.provider_name == "TensorRT-Engine":
+            if face_editor_type == 'Human-Face':
+                if not self.lp_stitching_model:
+                    if not os.path.exists("./models/liveportrait_onnx/stitching.trt"):
+                        onnx2trt(onnx_model_path="./models/liveportrait_onnx/stitching.onnx",
+                                 trt_model_path=None, precision="fp16",
+                                 verbose=False
+                                )
+                    self.lp_stitching_model = TensorRTPredictor(model_path="./models/liveportrait_onnx/stitching.trt")
+
+            stitching_model = self.lp_stitching_model
+
+            feat_stiching = faceutil.concat_feat(kp_source, kp_driving).contiguous()
+
+            nvtx.range_push("forward")
+
+            feed_dict = {}
+            feed_dict["input"] = feat_stiching
+            preds_dict = stitching_model.predict_async(feed_dict, torch.cuda.current_stream().cuda_stream)
+            #preds_dict = stitching_model.predict(feed_dict)
+            torch.cuda.synchronize()
+            delta = preds_dict["output"]
+
+            nvtx.range_pop()
+
+        else:
+            if face_editor_type == 'Human-Face':
+                if not self.lp_stitching_model:
+                    self.lp_stitching_model = onnxruntime.InferenceSession("./models/liveportrait_onnx/stitching.onnx", providers=self.providers)
+
+                stitching_model = self.lp_stitching_model
+
+            feat_stiching = faceutil.concat_feat(kp_source, kp_driving).contiguous()
+            delta = torch.empty((1,65), dtype=torch.float32, device='cuda').contiguous()
+
+            io_binding = stitching_model.io_binding()
+            io_binding.bind_input(name='input', device_type='cuda', device_id=0, element_type=np.float32, shape=feat_stiching.size(), buffer_ptr=feat_stiching.data_ptr())
+            io_binding.bind_output(name='output', device_type='cuda', device_id=0, element_type=np.float32, shape=delta.size(), buffer_ptr=delta.data_ptr())
+
+            torch.cuda.synchronize('cuda')
+            stitching_model.run_with_iobinding(io_binding)
+
+        return delta
+
+    def lp_stitching(self, kp_source: torch.Tensor, kp_driving: torch.Tensor, face_editor_type='Human-Face') -> torch.Tensor:
+        """ conduct the stitching
+        kp_source: Bxnum_kpx3
+        kp_driving: Bxnum_kpx3
+        """
+
+        bs, num_kp = kp_source.shape[:2]
+
+        kp_driving_new = kp_driving.clone()
+        delta = self.lp_stitch(kp_source, kp_driving_new, face_editor_type=face_editor_type)
+
+        delta_exp = delta[..., :3*num_kp].reshape(bs, num_kp, 3)  # 1x20x3
+        delta_tx_ty = delta[..., 3*num_kp:3*num_kp+2].reshape(bs, 1, 2)  # 1x1x2
+
+        kp_driving_new += delta_exp
+        kp_driving_new[..., :2] += delta_tx_ty
+
+        return kp_driving_new
+
+    def lp_warp_decode(self, feature_3d: torch.Tensor, kp_source: torch.Tensor, kp_driving: torch.Tensor, face_editor_type='Human-Face') -> torch.Tensor:
+        """ get the image after the warping of the implicit keypoints
+        feature_3d: Bx32x16x64x64, feature volume
+        kp_source: BxNx3
+        kp_driving: BxNx3
+        """
+
+        if self.provider_name == "TensorRT-Engine":
+            if face_editor_type == 'Human-Face':
+                if not self.lp_warping_spade_fix_model:
+                    if not os.path.exists("./models/liveportrait_onnx/warping_spade-fix.trt"):
+                        onnx2trt(onnx_model_path="./models/liveportrait_onnx/warping_spade-fix.onnx",
+                                 trt_model_path=None, precision="fp16",
+                                 custom_plugin_path="./models/grid_sample_3d_plugin.dll",
+                                 verbose=False
+                                )
+                    self.lp_warping_spade_fix_model = TensorRTPredictor(model_path="./models/liveportrait_onnx/warping_spade-fix.trt", custom_plugin_path="./models/grid_sample_3d_plugin.dll")
+
+            warping_spade_model = self.lp_warping_spade_fix_model
+
+            feature_3d = feature_3d.contiguous()
+            kp_source = kp_source.contiguous()
+            kp_driving = kp_driving.contiguous()
+
+            nvtx.range_push("forward")
+
+            feed_dict = {}
+            feed_dict["feature_3d"] = feature_3d
+            feed_dict["kp_source"] = kp_source
+            feed_dict["kp_driving"] = kp_driving
+            preds_dict = warping_spade_model.predict_async(feed_dict, torch.cuda.current_stream().cuda_stream)
+            #preds_dict = warping_spade_model.predict(feed_dict)
+            torch.cuda.synchronize()
+            out = preds_dict["out"]
+
+            nvtx.range_pop()
+        else:
+            if face_editor_type == 'Human-Face':
+                if not self.lp_warping_spade_fix_model:
+                    self.lp_warping_spade_fix_model = onnxruntime.InferenceSession("./models/liveportrait_onnx/warping_spade.onnx", providers=self.providers)
+
+                warping_spade_model = self.lp_warping_spade_fix_model
+
+            feature_3d = feature_3d.contiguous()
+            kp_source = kp_source.contiguous()
+            kp_driving = kp_driving.contiguous()
+
+            out = torch.empty((1,3,512,512), dtype=torch.float32, device='cuda').contiguous()
+            io_binding = warping_spade_model.io_binding()
+            io_binding.bind_input(name='feature_3d', device_type='cuda', device_id=0, element_type=np.float32, shape=feature_3d.size(), buffer_ptr=feature_3d.data_ptr())
+            io_binding.bind_input(name='kp_driving', device_type='cuda', device_id=0, element_type=np.float32, shape=kp_driving.size(), buffer_ptr=kp_driving.data_ptr())
+            io_binding.bind_input(name='kp_source', device_type='cuda', device_id=0, element_type=np.float32, shape=kp_source.size(), buffer_ptr=kp_source.data_ptr())
+            io_binding.bind_output(name='out', device_type='cuda', device_id=0, element_type=np.float32, shape=out.size(), buffer_ptr=out.data_ptr())
+
+            torch.cuda.synchronize('cuda')
+            warping_spade_model.run_with_iobinding(io_binding)
+
+        return out

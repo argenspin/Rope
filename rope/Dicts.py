@@ -127,6 +127,10 @@ DEFAULT_DATA = {
 'SwapFacesInfoText':                'SWAP:\nSwap assigned Source Faces and Target Faces.',
 'SwapFacesState':                   False,
 'SwapFacesText':                    'Swap Faces',
+'EditFacesDisplay':                 'text',
+'EditFacesInfoText':                'Edit:\nEdit Faces.',
+'EditFacesState':                   False,
+'EditFacesText':                    'Edit Faces',
 'EnhanceFrameDisplay':              'text',
 'EnhanceFrameInfoText':             'Enhance:\nEnhance Frame.',
 'EnhanceFrameState':                False,
@@ -194,7 +198,7 @@ DEFAULT_DATA = {
 'ShowLandmarksSwitchState':         False,
 #
 # Face Landmarks Position
-'LandmarksPositionAdjSwitchInfoText': 'KPS ADJUSTMENT:\nThis is an experimental feature to perform direct adjustments to the position of face landmarks found by the detector. ',
+'LandmarksPositionAdjSwitchInfoText': '5 - KPS ADJUSTMENT:\nThis is an experimental feature to perform direct adjustments to the position of face landmarks found by the detector. ',
 'LandmarksPositionAdjSwitchState':    False,
 #
 # Face Likeness
@@ -212,9 +216,9 @@ DEFAULT_DATA = {
 'OccluderSwitchInfoText':           'OCCLUSION MASK:\nAllow objects occluding the face to show up in the swapped image.',
 'OccluderSwitchState':              False,
 'DFLRCTColorSwitchInfoText':        'DFL RCT COLOR TRANSFER:\nUse RCT color transfer when swapping using DFL Models',
-'DFLRCTColorSwitchState':               False,
-'DFLLoadOnlyOneSwitchInfoText':           'DFL LOAD ONLY ONE MODEL:\nKeep only one DFL model in memory, when using DFL swapping',
-'DFLLoadOnlyOneSwitchState':               False,
+'DFLRCTColorSwitchState':           False,
+'DFLLoadOnlyOneSwitchInfoText':     'DFL LOAD ONLY ONE MODEL:\nKeep only one DFL model in memory, when using DFL swapping',
+'DFLLoadOnlyOneSwitchState':        False,
 'DFLXSegSwitchInfoText':            'DFL XSEG MASK:\nAllow objects occluding the face to show up in the swapped image.',
 'DFLXSegSwitchState':               False,
 'OrientSwitchInfoText':             'ORIENTATION:\nRotate the face detector to better detect faces at different angles',
@@ -612,8 +616,8 @@ DEFAULT_DATA = {
 'DetectTypeTextSelModes':           ['Retinaface', 'Yolov8', 'SCRDF', 'Yunet'],
 # Face Landmarks Detection
 'LandmarksDetectTypeTextSelInfoText': 'LANDMARKS FACE DETECTION MODEL:\nSelect the landmarks face detection model. Mostly only subtle differences, but can significant differences when the face is at extreme angles or covered.',
-'LandmarksDetectTypeTextSelMode':     '98',
-'LandmarksDetectTypeTextSelModes':    ['5', '68', '3d68', '98', '106', '478'],
+'LandmarksDetectTypeTextSelMode':     '203',
+'LandmarksDetectTypeTextSelModes':    ['5', '68', '3d68', '98', '106', '203', '478'],
 #
 # Similarity Type
 'SimilarityTypeTextSelInfoText':    'Similarity version:\nSelect the similarity to be used with arc face recognizer model.',
@@ -623,7 +627,7 @@ DEFAULT_DATA = {
 # ProvidersPriority
 'ProvidersPriorityTextSelInfoText':    'Providers Priority:\nSelect the providers priority to be used with the system.',
 'ProvidersPriorityTextSelMode':        'CUDA',
-'ProvidersPriorityTextSelModes':       ['CUDA', 'TensorRT', 'CPU'],
+'ProvidersPriorityTextSelModes':       ['CUDA', 'TensorRT', 'TensorRT-Engine', 'CPU'],
 #
 # Face Swapper Model
 'FaceSwapperModelTextSelInfoText':  'Face Swapper Model:\nSelect the Face Swapper model.',
@@ -673,6 +677,126 @@ DEFAULT_DATA = {
 # Text Entry
 'CLIPTextEntry':    '',
 'CLIPTextEntryInfoText':            'TEXT MASKING ENTRY:\nTo use, type a word(s) in the box separated by commas and press <enter>.',
+
+# Face Editor
+'FaceEditorTypeTextSelInfoText':   'Face Editor Type:\nSelect the target type to be edited in Face Editor.',
+'FaceEditorTypeTextSelMode':       'Human-Face',
+#'FaceEditorTypeTextSelModes':      ['Human-Face', 'Animal-Face'],
+'FaceEditorTypeTextSelModes':      ['Human-Face'],
+
+'FaceEditorIDSliderAmount':        1,
+'FaceEditorIDSliderInc':           1,
+'FaceEditorIDSliderInfoText':      'FACE EDITOR POSITION FACE ID:\nDetermines the target face in the frame that can be modified.',
+'FaceEditorIDSliderMax':           20,
+'FaceEditorIDSliderMin':           1,
+
+'CropScaleSliderAmount':           2.50,
+'CropScaleSliderInc':              0.05,
+'CropScaleSliderInfoText':         'Crop Scale:\nChanges source crop scale.',
+'CropScaleSliderMax':              3.20,
+'CropScaleSliderMin':              1.80,
+
+'EyesOpenRatioSliderAmount':       0.00,
+'EyesOpenRatioSliderInc':          0.01,
+'EyesOpenRatioSliderInfoText':     'Eyes Open Ratio:\nChanges the opening of the eyes.',
+'EyesOpenRatioSliderMax':          0.80,
+'EyesOpenRatioSliderMin':          -0.80,
+
+'LipsOpenRatioSliderAmount':       0.00,
+'LipsOpenRatioSliderInc':          0.01,
+'LipsOpenRatioSliderInfoText':     'Lips Open Ratio:\nChanges the opening of the lips.',
+'LipsOpenRatioSliderMax':          0.80,
+'LipsOpenRatioSliderMin':          -0.80,
+
+'HeadPitchSliderAmount':           0,
+'HeadPitchSliderInc':              1,
+'HeadPitchSliderInfoText':         'Head Pitch:\nChanges the head pitch.',
+'HeadPitchSliderMax':              15,
+'HeadPitchSliderMin':              -15,
+
+'HeadYawSliderAmount':             0,
+'HeadYawSliderInc':                1,
+'HeadYawSliderInfoText':           'Head Yaw:\nChanges the head yaw.',
+'HeadYawSliderMax':                15,
+'HeadYawSliderMin':                -15,
+
+'HeadRollSliderAmount':            0,
+'HeadRollSliderInc':               1,
+'HeadRollSliderInfoText':          'Head Roll:\nChanges the head roll.',
+'HeadRollSliderMax':               15,
+'HeadRollSliderMin':               -15,
+
+'XAxisMovementSliderAmount':       0.00,
+'XAxisMovementSliderInc':          0.01,
+'XAxisMovementSliderInfoText':     'X-Axis Movement:\nChanges the head direction x-axis.',
+'XAxisMovementSliderMax':          0.19,
+'XAxisMovementSliderMin':          -0.19,
+
+'YAxisMovementSliderAmount':       0.00,
+'YAxisMovementSliderInc':          0.01,
+'YAxisMovementSliderInfoText':     'Y-Axis Movement:\nChanges the head direction y-axis.',
+'YAxisMovementSliderMax':          0.19,
+'YAxisMovementSliderMin':          -0.19,
+
+'ZAxisMovementSliderAmount':       1.00,
+'ZAxisMovementSliderInc':          0.01,
+'ZAxisMovementSliderInfoText':     'Z-Axis Movement:\nChanges the head direction z-axis.',
+'ZAxisMovementSliderMax':          1.20,
+'ZAxisMovementSliderMin':          -0.90,
+
+'MouthPoutingSliderAmount':        0.00,
+'MouthPoutingSliderInc':           0.01,
+'MouthPoutingSliderInfoText':      'Mouth Pouting:\nPouting the mouth.',
+'MouthPoutingSliderMax':           0.09,
+'MouthPoutingSliderMin':           -0.09,
+
+'MouthPursingSliderAmount':        0.00,
+'MouthPursingSliderInc':           0.01,
+'MouthPursingSliderInfoText':      'Mouth Pursing:\nPursing the mouth.',
+'MouthPursingSliderMax':           15.00,
+'MouthPursingSliderMin':           -20.00,
+
+'MouthGrinSliderAmount':           0.00,
+'MouthGrinSliderInc':              0.01,
+'MouthGrinSliderInfoText':         'Mouth Grin:\nChanges the mouth grin.',
+'MouthGrinSliderMax':              15.00,
+'MouthGrinSliderMin':              0.00,
+
+'LipsCloseOpenSliderAmount':       0,
+'LipsCloseOpenSliderInc':          1,
+'LipsCloseOpenSliderInfoText':     'Lips Close <--> Open :\nChanges the closing or opening of the lips.',
+'LipsCloseOpenSliderMax':          120,
+'LipsCloseOpenSliderMin':          -90,
+
+'MouthSmileSliderAmount':          0.00,
+'MouthSmileSliderInc':             0.01,
+'MouthSmileSliderInfoText':        'Mouth Smile:\nChanges the mouth smile.',
+'MouthSmileSliderMax':             1.30,
+'MouthSmileSliderMin':             -0.30,
+
+'EyeWinkSliderAmount':             0.00,
+'EyeWinkSliderInc':                0.01,
+'EyeWinkSliderInfoText':           'Eye Wink:\nWinking eye.',
+'EyeWinkSliderMax':                39.0,
+'EyeWinkSliderMin':                0.0,
+
+'EyeBrowsDirectionSliderAmount':   0.00,
+'EyeBrowsDirectionSliderInc':      0.01,
+'EyeBrowsDirectionSliderInfoText': 'EyeBrows Direction:\nChanges the eyebrows direction.',
+'EyeBrowsDirectionSliderMax':      30.00,
+'EyeBrowsDirectionSliderMin':      -30.00,
+
+'EyeGazeHorizontalSliderAmount':   0.00,
+'EyeGazeHorizontalSliderInc':      0.01,
+'EyeGazeHorizontalSliderInfoText': 'EyeGaze Horizontal:\nChanges the horizontal eyegaze direction.',
+'EyeGazeHorizontalSliderMax':      30.00,
+'EyeGazeHorizontalSliderMin':      -30.00,
+
+'EyeGazeVerticalSliderAmount':     0.00,
+'EyeGazeVerticalSliderInc':        0.01,
+'EyeGazeVerticalSliderInfoText':   'EyeGaze Vertical:\nChanges the vertical eyegaze direction.',
+'EyeGazeVerticalSliderMax':        63.00,
+'EyeGazeVerticalSliderMin':        -63.00,
 }
 
 PARAM_VARS =    {
