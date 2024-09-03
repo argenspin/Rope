@@ -895,49 +895,51 @@ class VideoManager():
 
         bboxes, kpss_5, kpss = self.func_w_test("detect", self.models.run_detect, img, parameters['DetectTypeTextSel'], max_num=20, score=parameters['DetectScoreSlider']/100.0, use_landmark_detection=use_landmark_detection, landmark_detect_mode=landmark_detect_mode, landmark_score=parameters["LandmarksDetectScoreSlider"]/100.0, from_points=from_points, rotation_angles=rotation_angles)
 
-        # Set Max FaceID to FaceLandmarks and FaceEditor widgets
-        self.face_landmarks.apply_max_face_id_to_widget(frame_number, kpss_5.shape[0])
-        self.face_editor.apply_max_face_id_to_widget(frame_number, kpss_5.shape[0])
-        #
-
-        # Get embeddings for all faces found in the frame
         ret = []
-        # Face Landmarks
-        for i in range(kpss_5.shape[0]):
-            face_kps_5 = kpss_5[i]
-            face_kps = kpss[i]
+
+        # Only continue if atleast one face is detected
+        if len(kpss_5) > 0:
+            # Set Max FaceID to FaceLandmarks and FaceEditor widgets
+            self.face_landmarks.apply_max_face_id_to_widget(frame_number, kpss_5.shape[0])
+            self.face_editor.apply_max_face_id_to_widget(frame_number, kpss_5.shape[0])
+
+            # Get embeddings for all faces found in the frame
             # Face Landmarks
-            if self.face_landmarks and parameters['LandmarksPositionAdjSwitch']:
-                landmarks = self.face_landmarks.get_landmarks(frame_number, i + 1)
-                if landmarks is not None:
-                    # Change the ref points
-                    if parameters['FaceAdjSwitch']:
-                        face_kps_5[:,0] += parameters['KPSXSlider']
-                        face_kps_5[:,1] += parameters['KPSYSlider']
-                        face_kps_5[:,0] -= 255
-                        face_kps_5[:,0] *= (1+parameters['KPSScaleSlider']/100)
-                        face_kps_5[:,0] += 255
-                        face_kps_5[:,1] -= 255
-                        face_kps_5[:,1] *= (1+parameters['KPSScaleSlider']/100)
-                        face_kps_5[:,1] += 255
+            for i in range(kpss_5.shape[0]):
+                face_kps_5 = kpss_5[i]
+                face_kps = kpss[i]
+                # Face Landmarks
+                if self.face_landmarks and parameters['LandmarksPositionAdjSwitch']:
+                    landmarks = self.face_landmarks.get_landmarks(frame_number, i + 1)
+                    if landmarks is not None:
+                        # Change the ref points
+                        if parameters['FaceAdjSwitch']:
+                            face_kps_5[:,0] += parameters['KPSXSlider']
+                            face_kps_5[:,1] += parameters['KPSYSlider']
+                            face_kps_5[:,0] -= 255
+                            face_kps_5[:,0] *= (1+parameters['KPSScaleSlider']/100)
+                            face_kps_5[:,0] += 255
+                            face_kps_5[:,1] -= 255
+                            face_kps_5[:,1] *= (1+parameters['KPSScaleSlider']/100)
+                            face_kps_5[:,1] += 255
 
-                    face_kps_5[0][0] += landmarks[0][0]
-                    face_kps_5[0][1] += landmarks[0][1]
-                    face_kps_5[1][0] += landmarks[1][0]
-                    face_kps_5[1][1] += landmarks[1][1]
-                    face_kps_5[2][0] += landmarks[2][0]
-                    face_kps_5[2][1] += landmarks[2][1]
-                    face_kps_5[3][0] += landmarks[3][0]
-                    face_kps_5[3][1] += landmarks[3][1]
-                    face_kps_5[4][0] += landmarks[4][0]
-                    face_kps_5[4][1] += landmarks[4][1]
-            #
+                        face_kps_5[0][0] += landmarks[0][0]
+                        face_kps_5[0][1] += landmarks[0][1]
+                        face_kps_5[1][0] += landmarks[1][0]
+                        face_kps_5[1][1] += landmarks[1][1]
+                        face_kps_5[2][0] += landmarks[2][0]
+                        face_kps_5[2][1] += landmarks[2][1]
+                        face_kps_5[3][0] += landmarks[3][0]
+                        face_kps_5[3][1] += landmarks[3][1]
+                        face_kps_5[4][0] += landmarks[4][0]
+                        face_kps_5[4][1] += landmarks[4][1]
+                #
 
-            if control['SwapFacesButton']:
-                face_emb, _ = self.func_w_test('recognize',  self.models.run_recognize, img, face_kps_5, self.parameters["SimilarityTypeTextSel"], self.parameters['FaceSwapperModelTextSel'])
-                ret.append([face_kps_5, face_kps, face_emb])
-            else:
-                ret.append([face_kps_5, face_kps, None])
+                if control['SwapFacesButton']:
+                    face_emb, _ = self.func_w_test('recognize',  self.models.run_recognize, img, face_kps_5, self.parameters["SimilarityTypeTextSel"], self.parameters['FaceSwapperModelTextSel'])
+                    ret.append([face_kps_5, face_kps, face_emb])
+                else:
+                    ret.append([face_kps_5, face_kps, None])
 
         if ret:
             # Loop through target faces to see if they match our found face embeddings
