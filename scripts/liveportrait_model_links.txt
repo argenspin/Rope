@@ -1,0 +1,7 @@
+https://github.com/argenspin/rope-assets/releases/download/1.0.2/appearance_feature_extractor.onnx
+https://github.com/argenspin/rope-assets/releases/download/1.0.2/motion_extractor.onnx
+https://github.com/argenspin/rope-assets/releases/download/1.0.2/stitching.onnx
+https://github.com/argenspin/rope-assets/releases/download/1.0.2/stitching_eye.onnx
+https://github.com/argenspin/rope-assets/releases/download/1.0.2/stitching_lip.onnx
+https://github.com/argenspin/rope-assets/releases/download/1.0.2/warping_spade-fix.onnx
+https://github.com/argenspin/rope-assets/releases/download/1.0.2/warping_spade.onnx

@@ -8,6 +8,8 @@
 *.profile
 *.timing
 *.dfm
+models/liveportrait_onnx/*.onnx
+models/liveportrait_onnx/*.trt
 saved_parameters*.json
 startup_parameters*.json
 data.json

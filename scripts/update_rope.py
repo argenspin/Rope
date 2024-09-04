@@ -9,11 +9,11 @@ import sys
 def install_requirements():
     subprocess.check_call([sys.executable, "-m", "pip", "install", "-r", "requirements.txt"])
 
-def get_filename_from_link(file_link):
-    return f"models\{file_link.split(r'/')[-1]}"
+def get_filename_from_link(folder, file_link):
+    return f"{folder}{file_link.split(r'/')[-1]}"
 
-def download_file(url):
-    filename = get_filename_from_link(url)
+def download_file(folder, url):
+    filename = get_filename_from_link(folder, url)
 
     if Path(filename).is_file():
         print(f"Skipping {filename} as it is already downloaded ")
@@ -34,10 +34,18 @@ def download_file(url):
         if total_size != 0 and progress_bar.n != total_size:
             raise RuntimeError("Could not download file")
 
-#Download required Models        
-model_links = open("scripts\model_links.txt").read().splitlines()
+#Download Models        
+model_links = open(r"scripts\model_links.txt").read().splitlines()
+folder = 'models/'
 for link in model_links:
-    download_file(link)
+    download_file(folder, link)
+
+# Download Face Editor Models
+model_links = open(r"scripts\liveportrait_model_links.txt").read().splitlines()
+folder = 'models/liveportrait_onnx/'
+for link in model_links:
+    download_file(folder, link)
+
 
 ''' Additional Functions to execute when updating'''
 install_requirements()
