@@ -65,7 +65,7 @@ conda create -n Rope python=3.10.13
 conda activate Rope
 
 # install the dependencies
-conda install conda-forge::cuda-runtime=11.8.0 cudnn=8.9.2.26 conda-forge::gputil=1.4.0
+conda install nvidia/label/cuda-11.8.0::cuda-runtime cudnn=8.9.2.26 conda-forge::gputil=1.4.0
 python -m pip install -r requirements.txt
 ```
 
