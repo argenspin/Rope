@@ -1,3 +1,5 @@
+import cv2
+
 DEFAULT_DATA = {
 # Buttons
 'AddMarkerButtonDisplay':           'icon',
@@ -655,7 +657,11 @@ DEFAULT_DATA = {
 
 'WebCamMaxResolSelInfoText':        "WEBCAM MAX RESOLUTION:\nSelect the maximum resolution to be used by the webcam",
 'WebCamMaxResolSelMode':            '1920x1080',
-'WebCamMaxResolSelModes':           ['480x360', '640x480', '1280x720', '1920x1080'],
+'WebCamMaxResolSelModes':           ['480x360', '640x480','1280x720', '1920x1080','2560x1440','3840x2160'],
+
+'WebCamBackendSelInfoText':        "WEBCAM BACKEND:\nSelect the backend for selecting camera (Choose based on your OS)",
+'WebCamBackendSelMode':            'Default',
+'WebCamBackendSelModes':           ['Default', 'DirectShow','MSMF', 'V4L', 'V4L2','GSTREAMER'],
 
 'WebCamMaxFPSSelInfoText':        "WEBCAM MAX FPS:\nSelect the maximum FPS of the Webcam",
 'WebCamMaxFPSSelMode':            30,
@@ -858,4 +864,13 @@ PARAMS =   {
     'PlayMessage':         'PLAY - Plays the video. Press again to stop playing',
 
      }
+
+CAMERA_BACKENDS = {
+    'Default': cv2.CAP_ANY,
+    'DirectShow': cv2.CAP_DSHOW,
+    'MSMF': cv2.CAP_MSMF,
+    'V4L': cv2.CAP_V4L,
+    'V4L2': cv2.CAP_V4L2,
+    'GSTREAMER': cv2.CAP_GSTREAMER,
+}
 

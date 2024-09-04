@@ -29,7 +29,7 @@ from dfl.DFMModel import DFMModel
 
 device = 'cuda'
 from dfl.DFMModel import DFMModel
-
+from rope.Dicts import CAMERA_BACKENDS
 lock=threading.Lock()
 
 class VideoManager():
@@ -173,15 +173,8 @@ class VideoManager():
         self.video_file = file
         if self.webcam_selected(file):
             webcam_index = int(file[-1])
-            # Only use dshow if it is a Physical webcam in Windows
-            if platform.system == 'Windows':
-                try:
-                    self.capture = cv2.VideoCapture(webcam_index, cv2.CAP_DSHOW)
-                except:
-                    self.capture = cv2.VideoCapture(webcam_index)
-            else:
-                self.capture = cv2.VideoCapture(webcam_index)
-
+            camera_backend = CAMERA_BACKENDS[self.parameters['WebCamBackendSel']]
+            self.capture = cv2.VideoCapture(webcam_index, camera_backend)
             res_width, res_height = self.parameters['WebCamMaxResolSel'].split('x')
             self.capture.set(cv2.CAP_PROP_FRAME_WIDTH, int(res_width))
             self.capture.set(cv2.CAP_PROP_FRAME_HEIGHT, int(res_height))

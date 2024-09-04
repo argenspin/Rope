@@ -30,6 +30,7 @@ from os.path import isfile, join
 import inspect #print(inspect.currentframe().f_back.f_code.co_name, 'resize_image')
 import platform
 from platform import system
+from rope.Dicts import CAMERA_BACKENDS
 
 import gc
 # Face Landmarks
@@ -1293,6 +1294,10 @@ class GUI(tk.Tk):
         row = row + 1
         self.widget['SwapperTypeTextSel'] = GE.TextSelection(self.layer['parameters_frame'], 'SwapperTypeTextSel', 'Swapper Resolution', 3, self.update_data, 'parameter', 'parameter', 398, 20, row, 0, padx, pady, 0.72)
 
+        #Webcam Backend
+        row = row + 1
+        self.widget['WebCamBackendSel'] = GE.TextSelectionComboBox(self.layer['parameters_frame'], 'WebCamBackendSel', 'Webcam Backend', 3, self.update_data, 'parameter', 'parameter', 398, 20, row, 0, padx, pady, 0.72, 150)
+
         #Webcam Max Resolution
         row = row + 1
         self.widget['WebCamMaxResolSel'] = GE.TextSelectionComboBox(self.layer['parameters_frame'], 'WebCamMaxResolSel', 'Webcam Resolution', 3, self.update_data, 'parameter', 'parameter', 398, 20, row, 0, padx, pady, 0.72, 150)
@@ -1775,7 +1780,9 @@ class GUI(tk.Tk):
             elif name=='WebCamMaxResolSel' or name=='WebCamMaxFPSSel':
                 # self.add_action(load_target_video()
                 self.add_action('change_webcam_resolution_and_fps')
-
+            elif name=='WebCamBackendSel':
+                self.add_action('change_webcam_resolution_and_fps')
+                self.populate_target_videos()
             # Face Editor
             '''
             elif mode=='parameter_face_editor':
@@ -2510,27 +2517,26 @@ class GUI(tk.Tk):
     def populate_target_videos(self):
         videos = []
         #Webcam setup
-        try:
-            for i in range(self.parameters['WebCamMaxNoSlider']):
-                if platform.system == 'Windows':
-                    try:
-                        camera_capture = cv2.VideoCapture(i, cv2.CAP_DSHOW)
-                    except:
-                        camera_capture = cv2.VideoCapture(i)
-                else:
-                    camera_capture = cv2.VideoCapture(i)
-                success, webcam_frame = camera_capture.read()
+        camera_backend = CAMERA_BACKENDS[self.parameters['WebCamBackendSel']]
+        for i in range(self.parameters['WebCamMaxNoSlider']):
+            try:
+                camera = cv2.VideoCapture(i, camera_backend)
+                if not camera.isOpened():
+                    continue
+                success, webcam_frame = camera.read()
+                if not success:
+                    continue
                 ratio = float(webcam_frame.shape[0]) / webcam_frame.shape[1]
-
                 new_height = 50
                 new_width = int(new_height / ratio)
                 webcam_frame = cv2.resize(webcam_frame, (new_width, new_height))
                 webcam_frame = cv2.cvtColor(webcam_frame, cv2.COLOR_BGR2RGB)
                 webcam_frame[:new_height, :new_width, :] = webcam_frame
                 videos.append([webcam_frame, f'Webcam {i}'])
-                camera_capture.release()
-        except:
-            pass
+                camera.release()
+            except Exception as e:
+                print(e)
+
 
         # Recursively read all media files from directory
         directory =  self.json_dict["source videos"]
