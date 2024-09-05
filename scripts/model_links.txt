@@ -43,3 +43,4 @@ https://github.com/argenspin/rope-assets/releases/download/1.0.0/GPEN-BFR-1024.o
 https://github.com/argenspin/rope-assets/releases/download/1.0.0/realesr-general-x4v3.onnx
 https://github.com/argenspin/rope-assets/releases/download/1.0.0/RestoreFormerPlusPlus.onnx
 https://github.com/argenspin/rope-assets/releases/download/1.0.0/VQFRv2.fp16.onnx
+https://github.com/argenspin/rope-assets/releases/download/1.0.0/landmark.onnx

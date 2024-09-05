@@ -65,7 +65,7 @@ conda create -n Rope python=3.10.13
 conda activate Rope
 
 # install the dependencies
-conda install conda-forge::cuda-runtime=11.8.0 cudnn=8.9.2.26 conda-forge::gputil=1.4.0
+conda install nvidia/label/cuda-11.8.0::cuda-runtime cudnn=8.9.2.26 conda-forge::gputil=1.4.0
 python -m pip install -r requirements.txt
 ```
 
@@ -88,6 +88,10 @@ python -m pip install -r requirements.txt
 
 
  **Note: To use DFL models for swapping, put you models (.dfm) to the dfl_models directory**
+ 
+## [Donate](https://www.paypal.com/ncp/payment/NUV32JYCYB962)
+## [Join Discord](https://discord.gg/EcdVAFJzqp)
+
 ### Disclaimer: ###
 Rope is a personal project that I'm making available to the community as a thank you for all of the contributors ahead of me.
 I've copied the disclaimer from [Swap-Mukham](https://github.com/harisreedhar/Swap-Mukham) here since it is well-written and applies 100% to this repo.
